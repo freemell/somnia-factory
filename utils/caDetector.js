@@ -1,6 +1,7 @@
 const { ethers } = require('ethers');
 const { getTokenPrice } = require('./priceFetcher');
 const { getWalletBalance } = require('./walletManager');
+const { walletManager } = require('./walletManager');
 
 /**
  * Detects and validates contract addresses in messages
@@ -22,15 +23,30 @@ function detectContractAddress(message) {
   return null;
 }
 
+// Initialize provider
+const provider = new ethers.JsonRpcProvider(process.env.RPC_URL);
+
+// Check if address is a contract
+async function isContract(address) {
+  try {
+    const code = await provider.getCode(address);
+    return code !== '0x';
+  } catch (error) {
+    console.error('Error checking if address is contract:', error);
+    return false;
+  }
+}
+
 /**
  * Gets token information for a contract address
  */
 async function getTokenInfo(address) {
   try {
-    const provider = new ethers.JsonRpcProvider(process.env.RPC_URL);
-    
-    // Get token contract
-    const tokenContract = new ethers.Contract(
+    if (!await isContract(address)) {
+      throw new Error('Address is not a contract');
+    }
+
+    const contract = new ethers.Contract(
       address,
       [
         'function name() view returns (string)',
@@ -40,46 +56,23 @@ async function getTokenInfo(address) {
       ],
       provider
     );
-    
-    // Get token data
+
     const [name, symbol, decimals, totalSupply] = await Promise.all([
-      tokenContract.name(),
-      tokenContract.symbol(),
-      tokenContract.decimals(),
-      tokenContract.totalSupply()
+      contract.name(),
+      contract.symbol(),
+      contract.decimals(),
+      contract.totalSupply()
     ]);
-    
-    // Get price data
-    const price = await getTokenPrice(address);
-    
-    // Calculate market cap
-    const marketCap = (Number(totalSupply) * price) / (10 ** decimals);
-    
-    // Get price changes
-    const changes = await getPriceChanges(address);
-    
-    // Get price impact for 5 SOM
-    const priceImpact = await getPriceImpact(address, ethers.parseUnits('5', 18));
-    
-    // Get wallet balance
-    const walletBalance = await getWalletBalance(address);
-    
+
     return {
-      address,
       name,
       symbol,
       decimals,
-      price,
-      marketCap,
-      change5m: changes.change5m,
-      change1h: changes.change1h,
-      change24h: changes.change24h,
-      priceImpact,
-      walletBalance
+      totalSupply: ethers.formatUnits(totalSupply, decimals)
     };
   } catch (error) {
     console.error('Error getting token info:', error);
-    return null;
+    throw error;
   }
 }
 
@@ -121,7 +114,6 @@ async function getPriceChanges(address) {
  */
 async function getPriceImpact(tokenAddress, amountIn) {
   try {
-    const provider = new ethers.JsonRpcProvider(process.env.RPC_URL);
     const router = new ethers.Contract(
       process.env.DEX_ROUTER,
       require(process.env.DEX_ABI_PATH),
@@ -146,7 +138,35 @@ async function getPriceImpact(tokenAddress, amountIn) {
   }
 }
 
+// Validate contract address
+async function validateContractAddress(address) {
+  try {
+    if (!ethers.isAddress(address)) {
+      throw new Error('Invalid address format');
+    }
+
+    const isContractAddress = await isContract(address);
+    if (!isContractAddress) {
+      throw new Error('Address is not a contract');
+    }
+
+    const tokenInfo = await getTokenInfo(address);
+    return {
+      isValid: true,
+      ...tokenInfo
+    };
+  } catch (error) {
+    console.error('Error validating contract address:', error);
+    return {
+      isValid: false,
+      error: error.message
+    };
+  }
+}
+
 module.exports = {
   detectContractAddress,
-  getTokenInfo
+  isContract,
+  getTokenInfo,
+  validateContractAddress
 }; 

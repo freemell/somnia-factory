@@ -1,86 +1,109 @@
-const { createCanvas, loadImage } = require('canvas');
+const Jimp = require('jimp');
 const { ethers } = require('ethers');
+const fs = require('fs');
+const path = require('path');
 
 /**
  * Generates a trade result image
  */
 async function generateTradeImage(tradeData) {
   try {
-    // Create canvas
-    const canvas = createCanvas(800, 400);
-    const ctx = canvas.getContext('2d');
+    // Create a new image
+    const image = new Jimp(800, 400, '#1a1a1a');
     
-    // Set background
-    ctx.fillStyle = '#1a1a1a';
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    // Load fonts
+    const fontTitle = await Jimp.loadFont(Jimp.FONT_SANS_32_BLACK);
+    const fontRegular = await Jimp.loadFont(Jimp.FONT_SANS_16_BLACK);
+    const fontSmall = await Jimp.loadFont(Jimp.FONT_SANS_14_BLACK);
     
     // Add border
-    ctx.strokeStyle = '#333333';
-    ctx.lineWidth = 2;
-    ctx.strokeRect(10, 10, canvas.width - 20, canvas.height - 20);
+    image.scan(0, 0, image.bitmap.width, image.bitmap.height, function(x, y, idx) {
+      if (x < 2 || x > image.bitmap.width - 3 || y < 2 || y > image.bitmap.height - 3) {
+        this.bitmap.data[idx + 0] = 51;  // R
+        this.bitmap.data[idx + 1] = 51;  // G
+        this.bitmap.data[idx + 2] = 51;  // B
+      }
+    });
     
     // Add title
-    ctx.fillStyle = '#ffffff';
-    ctx.font = 'bold 32px Arial';
-    ctx.textAlign = 'center';
-    ctx.fillText('Trade Successful!', canvas.width / 2, 60);
+    image.print(
+      fontTitle,
+      0, 20,
+      {
+        text: 'Trade Successful!',
+        alignmentX: Jimp.HORIZONTAL_ALIGN_CENTER
+      },
+      800
+    );
     
-    // Add trade details
-    ctx.font = '24px Arial';
-    ctx.textAlign = 'left';
-    
-    // Token info
+    // Get token info
     const tokenIn = await getTokenInfo(tradeData.tokenIn);
     const tokenOut = await getTokenInfo(tradeData.tokenOut);
     
-    // Amount
-    ctx.fillText(`Amount: ${ethers.formatUnits(tradeData.amount, 18)} ${tokenIn.symbol}`, 50, 120);
+    // Add trade details
+    const details = [
+      `Amount: ${ethers.formatUnits(tradeData.amount, 18)} ${tokenIn.symbol}`,
+      `Price: $${tradeData.price}`,
+      `Value: $${(Number(tradeData.amount) * tradeData.price).toFixed(2)}`,
+      `Transaction: ${tradeData.txHash}`
+    ];
     
-    // Price
-    ctx.fillText(`Price: $${tradeData.price}`, 50, 160);
+    details.forEach((detail, index) => {
+      image.print(
+        fontRegular,
+        50,
+        100 + (index * 30),
+        detail
+      );
+    });
     
-    // Value
-    const value = Number(tradeData.amount) * tradeData.price;
-    ctx.fillText(`Value: $${value.toFixed(2)}`, 50, 200);
-    
-    // Transaction hash
-    ctx.font = '18px Arial';
-    ctx.fillText(`Transaction: ${tradeData.txHash}`, 50, 250);
-    
-    // Add token logos
-    const [logoIn, logoOut] = await Promise.all([
-      loadImage(tokenIn.logo || 'assets/default-token.png'),
-      loadImage(tokenOut.logo || 'assets/default-token.png')
-    ]);
-    
-    // Draw logos
-    ctx.drawImage(logoIn, 50, 280, 40, 40);
-    ctx.drawImage(logoOut, 100, 280, 40, 40);
-    
-    // Add arrow between logos
-    ctx.beginPath();
-    ctx.moveTo(100, 300);
-    ctx.lineTo(120, 300);
-    ctx.strokeStyle = '#ffffff';
-    ctx.lineWidth = 2;
-    ctx.stroke();
+    // Add token logos if available
+    try {
+      const [logoIn, logoOut] = await Promise.all([
+        Jimp.read(tokenIn.logo || 'assets/default-token.png'),
+        Jimp.read(tokenOut.logo || 'assets/default-token.png')
+      ]);
+      
+      logoIn.resize(40, 40);
+      logoOut.resize(40, 40);
+      
+      image.composite(logoIn, 50, 280);
+      image.composite(logoOut, 100, 280);
+      
+      // Add arrow
+      image.print(
+        fontRegular,
+        90,
+        290,
+        '→'
+      );
+    } catch (error) {
+      console.error('Error loading token logos:', error);
+    }
     
     // Add timestamp
-    ctx.font = '16px Arial';
-    ctx.textAlign = 'right';
-    ctx.fillText(new Date().toLocaleString(), canvas.width - 50, canvas.height - 30);
+    image.print(
+      fontSmall,
+      0,
+      image.bitmap.height - 30,
+      {
+        text: new Date().toLocaleString(),
+        alignmentX: Jimp.HORIZONTAL_ALIGN_RIGHT
+      },
+      750
+    );
+    
+    // Ensure directory exists
+    const dir = path.join(__dirname, '../assets/trades');
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
     
     // Save image
-    const imagePath = `assets/trades/${tradeData.txHash}.png`;
-    const fs = require('fs');
-    const out = fs.createWriteStream(imagePath);
-    const stream = canvas.createPNGStream();
-    stream.pipe(out);
+    const imagePath = path.join(dir, `${tradeData.txHash}.png`);
+    await image.writeAsync(imagePath);
     
-    return new Promise((resolve, reject) => {
-      out.on('finish', () => resolve(imagePath));
-      out.on('error', reject);
-    });
+    return imagePath;
   } catch (error) {
     console.error('Error generating trade image:', error);
     return null;

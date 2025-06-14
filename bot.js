@@ -3,6 +3,14 @@ const { Telegraf, Markup } = require('telegraf');
 const { mainMenuButtons, persistentButtons } = require('./handlers/inlineButtons');
 const { handleContractAddress, handleBuyAmount } = require('./handlers/inputHandler');
 const { detectContractAddress } = require('./utils/caDetector');
+const {
+  handleBridgeCommand,
+  handleBridgeMenu,
+  handleBridgeAsset,
+  handleBridgeAmount,
+  handleBridgeConfirmation,
+  handleBridgeHowItWorks
+} = require('./commands/bridge');
 
 // Initialize bot
 const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN);
@@ -33,6 +41,9 @@ bot.command('help', async (ctx) => {
   );
 });
 
+// Bridge command
+bot.command('bridge', handleBridgeCommand);
+
 // Handle contract address input
 bot.on('text', async (ctx) => {
   const address = detectContractAddress(ctx.message.text);
@@ -62,6 +73,24 @@ bot.action('buy', async (ctx) => {
     Markup.inlineKeyboard(persistentButtons)
   );
 });
+
+// Handle bridge button
+bot.action('bridge', handleBridgeCommand);
+
+// Handle bridge menu
+bot.action('bridge_menu', handleBridgeMenu);
+
+// Handle bridge asset selection
+bot.action(/bridge_(eth|usdt)/, handleBridgeAsset);
+
+// Handle bridge amount selection
+bot.action(/bridge_amount_(eth|usdt)_(\d+\.\d+)/, handleBridgeAmount);
+
+// Handle bridge confirmation
+bot.action(/bridge_confirm_(eth|usdt)_(\d+\.\d+)/, handleBridgeConfirmation);
+
+// Handle bridge how it works
+bot.action('bridge_how', handleBridgeHowItWorks);
 
 // Handle fund button
 bot.action('fund', async (ctx) => {

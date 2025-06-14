@@ -1,6 +1,7 @@
 const { Telegraf, Markup } = require('telegraf');
 const { getWalletForUser } = require('../utils/wallet');
 const { supabase } = require('../db/supabase');
+const { handleBridgeTransfer } = require('../utils/bridgeHandler');
 
 /**
  * Bridge command handler
@@ -108,9 +109,182 @@ async function handleChainSelection(ctx) {
   }
 }
 
+// Bridge menu buttons
+const bridgeMenuButtons = [
+  [Markup.button.callback('Bridge ETH → SOM', 'bridge_eth')],
+  [Markup.button.callback('Bridge USDT → SOM', 'bridge_usdt')],
+  [Markup.button.callback('How It Works', 'bridge_how')],
+  [Markup.button.callback('« Back to Main Menu', 'main_menu')]
+];
+
+// Amount selection buttons
+function getAmountButtons(token) {
+  return [
+    [
+      Markup.button.callback('0.1', `bridge_amount_${token}_0.1`),
+      Markup.button.callback('0.5', `bridge_amount_${token}_0.5`),
+      Markup.button.callback('1.0', `bridge_amount_${token}_1.0`)
+    ],
+    [
+      Markup.button.callback('2.0', `bridge_amount_${token}_2.0`),
+      Markup.button.callback('5.0', `bridge_amount_${token}_5.0`),
+      Markup.button.callback('10.0', `bridge_amount_${token}_10.0`)
+    ],
+    [Markup.button.callback('« Back to Bridge Menu', 'bridge_menu')]
+  ];
+}
+
+// Bridge command handler
+async function handleBridgeCommand(ctx) {
+  await ctx.reply(
+    '🌉 *Bridge Assets*\n\n' +
+    'Select the asset you want to bridge from Sepolia to Somnia:',
+    {
+      parse_mode: 'Markdown',
+      ...Markup.inlineKeyboard(bridgeMenuButtons)
+    }
+  );
+}
+
+// Bridge menu handler
+async function handleBridgeMenu(ctx) {
+  await ctx.editMessageText(
+    '🌉 *Bridge Assets*\n\n' +
+    'Select the asset you want to bridge from Sepolia to Somnia:',
+    {
+      parse_mode: 'Markdown',
+      ...Markup.inlineKeyboard(bridgeMenuButtons)
+    }
+  );
+}
+
+// Bridge asset selection handler
+async function handleBridgeAsset(ctx) {
+  const [_, token] = ctx.match[1].split('_');
+  
+  await ctx.editMessageText(
+    `How much ${token.toUpperCase()} would you like to bridge?`,
+    {
+      parse_mode: 'Markdown',
+      ...Markup.inlineKeyboard(getAmountButtons(token))
+    }
+  );
+}
+
+// Bridge amount selection handler
+async function handleBridgeAmount(ctx) {
+  const [_, token, amount] = ctx.match[1].split('_');
+  
+  // Get user's Sepolia address from database
+  const { data: user } = await supabase
+    .from('users')
+    .select('sepolia_address')
+    .eq('telegram_id', ctx.from.id)
+    .single();
+  
+  if (!user?.sepolia_address) {
+    return ctx.editMessageText(
+      '❌ *Error*\n\n' +
+      'Please set up your Sepolia wallet first.\n' +
+      'Use the /wallet command to add your address.',
+      {
+        parse_mode: 'Markdown',
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback('« Back to Bridge Menu', 'bridge_menu')]
+        ])
+      }
+    );
+  }
+  
+  await ctx.editMessageText(
+    `🌉 *Bridge ${amount} ${token.toUpperCase()}*\n\n` +
+    `Send ${amount} ${token.toUpperCase()} to this Sepolia address:\n\n` +
+    `\`${process.env.BRIDGE_RECEIVER_ADDRESS}\`\n\n` +
+    'Once you\'ve sent the tokens, click the button below to proceed.',
+    {
+      parse_mode: 'Markdown',
+      ...Markup.inlineKeyboard([
+        [Markup.button.callback('✅ I\'ve Sent It', `bridge_confirm_${token}_${amount}`)],
+        [Markup.button.callback('« Back to Bridge Menu', 'bridge_menu')]
+      ])
+    }
+  );
+}
+
+// Bridge confirmation handler
+async function handleBridgeConfirmation(ctx) {
+  const [_, token, amount] = ctx.match[1].split('_');
+  
+  await ctx.editMessageText(
+    '⏳ *Processing Bridge*\n\n' +
+    'Please wait while we verify your transfer...',
+    {
+      parse_mode: 'Markdown',
+      ...Markup.inlineKeyboard([
+        [Markup.button.callback('🔄 Refresh Status', `bridge_status_${token}_${amount}`)]
+      ])
+    }
+  );
+  
+  // Start bridge process
+  const result = await handleBridgeTransfer(ctx.from.id, token, amount);
+  
+  if (result.success) {
+    await ctx.editMessageText(
+      '✅ *Bridge Successful!*\n\n' +
+      `Amount: ${amount} ${token.toUpperCase()}\n` +
+      `Transaction: \`${result.txHash}\`\n\n` +
+      'Your tokens have been bridged to Somnia.',
+      {
+        parse_mode: 'Markdown',
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback('« Back to Bridge Menu', 'bridge_menu')]
+        ])
+      }
+    );
+  } else {
+    await ctx.editMessageText(
+      '❌ *Bridge Failed*\n\n' +
+      `Error: ${result.error}\n\n` +
+      'Please try again or contact support.',
+      {
+        parse_mode: 'Markdown',
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback('« Back to Bridge Menu', 'bridge_menu')]
+        ])
+      }
+    );
+  }
+}
+
+// How it works handler
+async function handleBridgeHowItWorks(ctx) {
+  await ctx.editMessageText(
+    '📖 *How Bridge Works*\n\n' +
+    '1. Select the asset you want to bridge\n' +
+    '2. Choose the amount\n' +
+    '3. Send the tokens to the provided address\n' +
+    '4. Click "I\'ve Sent It" to confirm\n' +
+    '5. Wait for the bridge to complete\n\n' +
+    'The bridge process typically takes 1-2 minutes.',
+    {
+      parse_mode: 'Markdown',
+      ...Markup.inlineKeyboard([
+        [Markup.button.callback('« Back to Bridge Menu', 'bridge_menu')]
+      ])
+    }
+  );
+}
+
 module.exports = {
   handleBridge,
   handleTokenSelection,
   handleAmountSelection,
-  handleChainSelection
+  handleChainSelection,
+  handleBridgeCommand,
+  handleBridgeMenu,
+  handleBridgeAsset,
+  handleBridgeAmount,
+  handleBridgeConfirmation,
+  handleBridgeHowItWorks
 }; 
