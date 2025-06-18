@@ -1,7 +1,7 @@
 const { Telegraf, Markup } = require('telegraf');
 const { getWalletForUser } = require('../utils/wallet');
 const { supabase } = require('../db/supabase');
-const { handleBridgeTransfer } = require('../utils/bridgeHandler');
+const { handleBridgeTransfer, checkAndMintTestnetBridge } = require('../utils/bridgeHandler');
 
 /**
  * Bridge command handler
@@ -137,12 +137,16 @@ function getAmountButtons(token) {
 // Bridge command handler
 async function handleBridgeCommand(ctx) {
   await ctx.reply(
-    '🌉 *Bridge Assets*\n\n' +
-    'Select the asset you want to bridge from Sepolia to Somnia:',
-    {
-      parse_mode: 'Markdown',
-      ...Markup.inlineKeyboard(bridgeMenuButtons)
-    }
+    '🌉 Bridge Assets\n\n' +
+    'Select a bridge option:',
+    Markup.inlineKeyboard([
+      [
+        Markup.button.callback('🧪 Testnet Bridge', 'bridge_testnet'),
+        Markup.button.callback('🌐 Mainnet Bridge', 'bridge_mainnet')
+      ],
+      [Markup.button.callback('❓ How It Works', 'bridge_how')],
+      [Markup.button.callback('« Back', 'main_menu')]
+    ])
   );
 }
 
@@ -276,6 +280,100 @@ async function handleBridgeHowItWorks(ctx) {
   );
 }
 
+// Show bridge options
+const bridgeOptions = Markup.inlineKeyboard([
+  [
+    Markup.button.callback('🧪 Sepolia ETH', 'bridge_sepolia'),
+    Markup.button.callback('🪙 Mumbai USDT', 'bridge_mumbai')
+  ],
+  [
+    Markup.button.callback('🔘 BSC Test BNB', 'bridge_bsc'),
+    Markup.button.callback('🔙 Back', 'main_menu')
+  ]
+]);
+
+// Handle bridge source selection
+async function handleBridgeSource(ctx) {
+  const source = ctx.match[1]; // sepolia, mumbai, or bsc
+  const sources = {
+    sepolia: {
+      name: 'Sepolia ETH',
+      symbol: 'ETH',
+      address: process.env.SEPOLIA_RECEIVER
+    },
+    mumbai: {
+      name: 'Mumbai USDT',
+      symbol: 'USDT',
+      address: process.env.MUMBAI_RECEIVER
+    },
+    bsc: {
+      name: 'BSC Test BNB',
+      symbol: 'BNB',
+      address: process.env.BSC_RECEIVER
+    }
+  };
+
+  const selectedSource = sources[source];
+  
+  // Show amount input prompt
+  await ctx.reply(
+    `To bridge from ${selectedSource.name} to Somnia Testnet:\n\n` +
+    `1. Send the ${selectedSource.symbol} to this address:\n` +
+    `\`${selectedSource.address}\`\n\n` +
+    `2. Tap [✅ I've Sent It] after you send it.`,
+    {
+      parse_mode: 'Markdown',
+      ...Markup.inlineKeyboard([
+        [Markup.button.callback('✅ I\'ve Sent It', `confirm_bridge_${source}`)]
+      ])
+    }
+  );
+}
+
+// Handle bridge confirmation
+async function handleBridgeConfirmationTestnet(ctx) {
+  const source = ctx.match[1]; // sepolia, mumbai, or bsc
+  
+  // Show processing message
+  await ctx.reply('⏳ Checking your transaction...');
+  
+  try {
+    // Call bridge handler to verify and mint tokens
+    const result = await checkAndMintTestnetBridge(ctx.from.id, source);
+    
+    if (result.success) {
+      await ctx.reply(
+        `✅ Successfully bridged ${result.amount} ${result.symbol} to Somnia testnet!\n` +
+        `Transaction: \`${result.txHash}\``,
+        { parse_mode: 'Markdown' }
+      );
+    } else {
+      await ctx.reply('❌ Transaction not found. Please make sure you sent the tokens and try again.');
+    }
+  } catch (error) {
+    console.error('Bridge error:', error);
+    await ctx.reply('❌ An error occurred while processing your bridge request. Please try again later.');
+  }
+}
+
+// Testnet bridge menu
+async function handleTestnetBridge(ctx) {
+  await ctx.reply(
+    '🧪 Testnet Bridge\n\n' +
+    'Select the testnet you want to bridge from:',
+    Markup.inlineKeyboard([
+      [
+        Markup.button.callback('🧪 Sepolia ETH', 'bridge_sepolia'),
+        Markup.button.callback('🪙 Mumbai USDT', 'bridge_mumbai')
+      ],
+      [
+        Markup.button.callback('🔘 BSC Test BNB', 'bridge_bsc'),
+        Markup.button.callback('« Back', 'bridge')
+      ]
+    ])
+  );
+}
+
 module.exports = {
   handleBridge,
   handleTokenSelection,
@@ -286,5 +384,8 @@ module.exports = {
   handleBridgeAsset,
   handleBridgeAmount,
   handleBridgeConfirmation,
-  handleBridgeHowItWorks
+  handleBridgeHowItWorks,
+  handleBridgeSource,
+  handleBridgeConfirmationTestnet,
+  handleTestnetBridge
 }; 

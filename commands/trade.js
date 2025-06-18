@@ -14,10 +14,25 @@ async function handleTrade(ctx) {
       'Select token to trade:',
       Markup.inlineKeyboard([
         [
-          Markup.button.callback('SOM', 'trade_som'),
-          Markup.button.callback('USDT', 'trade_usdt')
+          Markup.button.callback('Buy 0.1 SOM', 'trade_buy_som_0.1'),
+          Markup.button.callback('Buy 0.5 SOM', 'trade_buy_som_0.5'),
+          Markup.button.callback('Buy X SOM ✏️', 'trade_buy_som_custom')
         ],
-        [Markup.button.callback('❌ Cancel', 'cancel')]
+        [
+          Markup.button.callback('Sell 50%', 'trade_sell_som_50'),
+          Markup.button.callback('Sell 100%', 'trade_sell_som_100'),
+          Markup.button.callback('Sell X% ✏️', 'trade_sell_som_custom')
+        ],
+        [
+          Markup.button.callback('Cat Ai ✅', 'trade_cat_ai'),
+          Markup.button.callback('NFA', 'trade_nfa'),
+          Markup.button.callback('Watchlist ⭐', 'trade_watchlist')
+        ],
+        [
+          Markup.button.callback('← Back', 'back'),
+          Markup.button.callback('↻ Refresh', 'refresh'),
+          Markup.button.callback('Sort: Value', 'sort_value')
+        ]
       ])
     );
   } catch (error) {
@@ -31,18 +46,46 @@ async function handleTrade(ctx) {
  */
 async function handleTokenSelection(ctx) {
   try {
-    const token = ctx.match[1];
+    const [action, token, amount] = ctx.match[1].split('_');
     
-    // Show amount input
+    if (amount === 'custom') {
+      // Handle custom amount input
+      await ctx.reply(
+        `Enter custom ${action} amount for ${token}:`,
+        Markup.inlineKeyboard([
+          [Markup.button.callback('❌ Cancel', 'cancel')]
+        ])
+      );
+      return;
+    }
+
+    // Get user's wallet
+    const wallet = await getWalletForUser(ctx.from.id);
+    
+    // Get current price
+    const price = await getTokenPrice(token);
+    
+    // Calculate expected output based on action and amount
+    let amountIn, amountOut;
+    if (action === 'buy') {
+      amountIn = ethers.parseUnits(amount, 18);
+      amountOut = await getAmountsOut(amountIn, [token, 'USDT']);
+    } else {
+      // For sell actions, calculate percentage of holdings
+      const balance = await wallet.getBalance();
+      const sellAmount = balance.mul(parseInt(amount)).div(100);
+      amountIn = sellAmount;
+      amountOut = await getAmountsOut(amountIn, [token, 'USDT']);
+    }
+    
+    // Show confirmation
     await ctx.reply(
-      'Enter amount to trade:',
+      `Confirm ${action}:\n\n${amount} ${token} → ${ethers.formatUnits(amountOut, 18)} USDT\n\nPrice: $${price}`,
       Markup.inlineKeyboard([
         [
-          Markup.button.callback('0.1', `trade_amount_${token}_0.1`),
-          Markup.button.callback('1', `trade_amount_${token}_1`),
-          Markup.button.callback('10', `trade_amount_${token}_10`)
-        ],
-        [Markup.button.callback('❌ Cancel', 'cancel')]
+          Markup.button.callback('✅ Confirm', `trade_confirm_${action}_${token}_${amount}`),
+          Markup.button.callback('❌ Cancel', 'cancel')
+        ]
       ])
     );
   } catch (error) {

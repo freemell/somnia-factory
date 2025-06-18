@@ -1,6 +1,7 @@
 const { ethers } = require('ethers');
 const { supabase } = require('../db/supabase');
 const { generateTradeImage } = require('./imageGen');
+const { getWalletForUser } = require('./wallet');
 
 // Initialize providers
 const sepoliaProvider = new ethers.JsonRpcProvider(process.env.ETH_RPC_URL);
@@ -8,6 +9,18 @@ const somniaProvider = new ethers.JsonRpcProvider(process.env.RPC_URL);
 
 // Bridge receiver wallet (for testnet)
 const bridgeWallet = new ethers.Wallet(process.env.BRIDGE_PRIVATE_KEY, somniaProvider);
+
+// Initialize providers for different testnets
+const sepoliaProviderTestnet = new ethers.providers.JsonRpcProvider(process.env.SEPOLIA_RPC_URL);
+const mumbaiProviderTestnet = new ethers.providers.JsonRpcProvider(process.env.MUMBAI_RPC_URL);
+const bscProviderTestnet = new ethers.providers.JsonRpcProvider(process.env.BSC_TESTNET_RPC);
+
+// Token conversion rates (can be adjusted)
+const CONVERSION_RATES = {
+    sepolia: 1, // 1 ETH = 1 tSOM
+    mumbai: 0.5, // 1 USDT = 0.5 tSOM
+    bsc: 0.8 // 1 BNB = 0.8 tSOM
+};
 
 /**
  * Handles the bridge transfer process
@@ -169,6 +182,106 @@ async function generateBridgeImage(token, amount, txHash) {
   }
 }
 
+/**
+ * Check if a transaction exists and mint testnet tokens
+ */
+async function checkAndMintTestnetBridge(userId, source) {
+    try {
+        // Get user's Somnia wallet
+        const userWallet = await getWalletForUser(userId);
+        if (!userWallet) {
+            throw new Error('User wallet not found');
+        }
+
+        // Get appropriate provider based on source
+        const provider = getProviderForSource(source);
+        const receiverAddress = getReceiverAddressForSource(source);
+
+        // Get recent transactions for the receiver address
+        const blockNumber = await provider.getBlockNumber();
+        const transactions = await provider.getLogs({
+            fromBlock: blockNumber - 100, // Check last 100 blocks
+            toBlock: blockNumber,
+            address: receiverAddress
+        });
+
+        // Find the most recent transaction
+        if (transactions.length === 0) {
+            return { success: false, message: 'No recent transactions found' };
+        }
+
+        const latestTx = transactions[transactions.length - 1];
+        const tx = await provider.getTransaction(latestTx.transactionHash);
+        
+        // Calculate amount to mint based on conversion rate
+        const amount = ethers.utils.formatEther(tx.value);
+        const somniaAmount = amount * CONVERSION_RATES[source];
+
+        // Mint tokens on Somnia testnet
+        const somniaWallet = new ethers.Wallet(process.env.DEPLOYER_PRIVATE_KEY, somniaProvider);
+        const mintTx = await mintTestnetTokens(somniaWallet, userWallet.address, somniaAmount);
+        
+        return {
+            success: true,
+            amount: somniaAmount,
+            symbol: 'tSOM',
+            txHash: mintTx.hash
+        };
+    } catch (error) {
+        console.error('Bridge error:', error);
+        throw error;
+    }
+}
+
+/**
+ * Get provider for specific testnet
+ */
+function getProviderForSource(source) {
+    switch (source) {
+        case 'sepolia':
+            return sepoliaProviderTestnet;
+        case 'mumbai':
+            return mumbaiProviderTestnet;
+        case 'bsc':
+            return bscProviderTestnet;
+        default:
+            throw new Error('Invalid source network');
+    }
+}
+
+/**
+ * Get receiver address for specific testnet
+ */
+function getReceiverAddressForSource(source) {
+    switch (source) {
+        case 'sepolia':
+            return process.env.SEPOLIA_RECEIVER;
+        case 'mumbai':
+            return process.env.MUMBAI_RECEIVER;
+        case 'bsc':
+            return process.env.BSC_RECEIVER;
+        default:
+            throw new Error('Invalid source network');
+    }
+}
+
+/**
+ * Mint testnet tokens on Somnia
+ */
+async function mintTestnetTokens(wallet, recipient, amount) {
+    // This is a placeholder - in a real implementation, you would:
+    // 1. Deploy a test token contract
+    // 2. Call its mint function
+    // For now, we'll simulate a successful transaction
+    const tx = {
+        to: recipient,
+        value: ethers.utils.parseEther(amount.toString())
+    };
+    
+    return await wallet.sendTransaction(tx);
+}
+
 module.exports = {
-  handleBridgeTransfer
+  handleBridgeTransfer,
+  checkAndMintTestnetBridge
 }; 
