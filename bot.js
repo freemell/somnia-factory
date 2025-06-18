@@ -4,24 +4,48 @@ const { mainMenuButtons, persistentButtons } = require('./handlers/inlineButtons
 const { handleContractAddress, handleBuyAmount } = require('./handlers/inputHandler');
 const { detectContractAddress } = require('./utils/caDetector');
 const {
+  handleStart,
+  handleCreateWallet,
+  handleImportWallet,
+  handlePrivateKeyInput
+} = require('./commands/start');
+const {
   handleBridgeCommand,
   handleBridgeMenu,
   handleBridgeAsset,
   handleBridgeAmount,
   handleBridgeConfirmation,
-  handleBridgeHowItWorks
+  handleBridgeHowItWorks,
+  handleBridgeSource,
+  handleBridgeConfirmationTestnet
 } = require('./commands/bridge');
 
 // Initialize bot
 const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN);
 
 // Start command
-bot.command('start', async (ctx) => {
-  await ctx.reply(
-    'Welcome to Somnia Trading Bot! 🚀\n\n' +
-    'Send me a token contract address to get started.',
-    Markup.inlineKeyboard(mainMenuButtons)
-  );
+bot.command('start', handleStart);
+
+// Handle wallet creation
+bot.action('create_wallet', handleCreateWallet);
+
+// Handle wallet import
+bot.action('import_wallet', handleImportWallet);
+
+// Handle private key input
+bot.on('text', async (ctx) => {
+  // Check if this is a private key input (after import_wallet action)
+  if (ctx.session && ctx.session.waitingForPrivateKey) {
+    await handlePrivateKeyInput(ctx);
+    delete ctx.session.waitingForPrivateKey;
+    return;
+  }
+
+  // Handle contract address input
+  const address = detectContractAddress(ctx.message.text);
+  if (address) {
+    await handleContractAddress(ctx);
+  }
 });
 
 // Help command
@@ -43,14 +67,6 @@ bot.command('help', async (ctx) => {
 
 // Bridge command
 bot.command('bridge', handleBridgeCommand);
-
-// Handle contract address input
-bot.on('text', async (ctx) => {
-  const address = detectContractAddress(ctx.message.text);
-  if (address) {
-    await handleContractAddress(ctx);
-  }
-});
 
 // Handle buy amount selection
 bot.action(/buy_(\d+)_(.+)/, async (ctx) => {
@@ -77,8 +93,11 @@ bot.action('buy', async (ctx) => {
 // Handle bridge button
 bot.action('bridge', handleBridgeCommand);
 
-// Handle bridge menu
-bot.action('bridge_menu', handleBridgeMenu);
+// Handle testnet bridge menu
+bot.action('bridge_testnet', handleTestnetBridge);
+
+// Handle mainnet bridge menu
+bot.action('bridge_mainnet', handleBridgeMenu);
 
 // Handle bridge asset selection
 bot.action(/bridge_(eth|usdt)/, handleBridgeAsset);
@@ -91,6 +110,12 @@ bot.action(/bridge_confirm_(eth|usdt)_(\d+\.\d+)/, handleBridgeConfirmation);
 
 // Handle bridge how it works
 bot.action('bridge_how', handleBridgeHowItWorks);
+
+// Handle testnet bridge source selection
+bot.action(/bridge_(sepolia|mumbai|bsc)/, handleBridgeSource);
+
+// Handle testnet bridge confirmation
+bot.action(/confirm_bridge_(sepolia|mumbai|bsc)/, handleBridgeConfirmationTestnet);
 
 // Handle fund button
 bot.action('fund', async (ctx) => {

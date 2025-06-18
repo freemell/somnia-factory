@@ -1,6 +1,20 @@
 const { Telegraf, Markup } = require('telegraf');
-const { createNewWallet } = require('../utils/wallet');
+const { createNewWallet, validatePrivateKey } = require('../utils/wallet');
 const { supabase } = require('../db/supabase');
+const { showMainMenu, showWalletChoiceMenu } = require('../utils/menus');
+
+/**
+ * Check if a user exists in the database
+ */
+async function userExists(userId) {
+  const { data, error } = await supabase
+    .from('users')
+    .select('id')
+    .eq('id', userId)
+    .single();
+
+  return !!data && !error;
+}
 
 /**
  * Start command handler
@@ -8,27 +22,29 @@ const { supabase } = require('../db/supabase');
 async function handleStart(ctx) {
   try {
     const userId = ctx.from.id;
-    
-    // Check if user already has a wallet
-    const { data: existingUser } = await supabase
-      .from('users')
-      .select('*')
-      .eq('id', userId)
-      .single();
+    const isReturning = await userExists(userId);
 
-    if (existingUser) {
-      return ctx.reply(
-        'Welcome back! What would you like to do?',
-        Markup.inlineKeyboard([
-          [Markup.button.callback('💰 Check Balance', 'balance')],
-          [Markup.button.callback('🔄 Trade', 'trade')],
-          [Markup.button.callback('⏱️ Limit Order', 'limitOrder')],
-          [Markup.button.callback('🌉 Bridge', 'bridge')]
-        ])
-      );
+    if (!isReturning) {
+      // First time user - show wallet choice menu
+      return showWalletChoiceMenu(ctx);
     }
 
-    // Create new wallet for user
+    // Returning user - show main menu
+    return showMainMenu(ctx);
+  } catch (error) {
+    console.error('Start command error:', error);
+    return ctx.reply('Sorry, something went wrong. Please try again.');
+  }
+}
+
+/**
+ * Handle wallet creation
+ */
+async function handleCreateWallet(ctx) {
+  try {
+    const userId = ctx.from.id;
+    
+    // Create new wallet
     const { address, encryptedKey } = await createNewWallet();
     
     // Save to database
@@ -39,25 +55,87 @@ async function handleStart(ctx) {
       imported: false
     });
 
-    return ctx.reply(
-      `Welcome! I've created a new wallet for you:\n\nAddress: \`${address}\`\n\nWhat would you like to do?`,
-      {
-        parse_mode: 'Markdown',
-        ...Markup.inlineKeyboard([
-          [Markup.button.callback('💰 Check Balance', 'balance')],
-          [Markup.button.callback('🔄 Trade', 'trade')],
-          [Markup.button.callback('⏱️ Limit Order', 'limitOrder')],
-          [Markup.button.callback('🌉 Bridge', 'bridge')],
-          [Markup.button.callback('🔑 Import Wallet', 'importWallet')]
-        ])
-      }
+    // Show success message and main menu
+    await ctx.reply(
+      `✅ New wallet created successfully!\n\nAddress: \`${address}\``,
+      { parse_mode: 'Markdown' }
+    );
+    
+    return showMainMenu(ctx);
+  } catch (error) {
+    console.error('Create wallet error:', error);
+    return ctx.reply('Sorry, something went wrong while creating your wallet. Please try again.');
+  }
+}
+
+/**
+ * Handle wallet import
+ */
+async function handleImportWallet(ctx) {
+  try {
+    // Prompt for private key
+    await ctx.reply(
+      'Please send your private key. I will delete the message immediately after processing.',
+      Markup.inlineKeyboard([
+        [Markup.button.callback('❌ Cancel', 'cancel')]
+      ])
     );
   } catch (error) {
-    console.error('Start command error:', error);
+    console.error('Import wallet error:', error);
     return ctx.reply('Sorry, something went wrong. Please try again.');
   }
 }
 
+/**
+ * Handle private key input
+ */
+async function handlePrivateKeyInput(ctx) {
+  try {
+    const userId = ctx.from.id;
+    const privateKey = ctx.message.text;
+
+    // Delete the message containing the private key
+    await ctx.deleteMessage(ctx.message.message_id);
+
+    // Validate private key
+    const isValid = await validatePrivateKey(privateKey);
+    if (!isValid) {
+      return ctx.reply(
+        '❌ Invalid private key. Please try again.',
+        Markup.inlineKeyboard([
+          [Markup.button.callback('🔐 Import Wallet', 'import_wallet')],
+          [Markup.button.callback('❌ Cancel', 'cancel')]
+        ])
+      );
+    }
+
+    // Get wallet address from private key
+    const { address, encryptedKey } = await createNewWallet(privateKey);
+    
+    // Save to database
+    await supabase.from('users').insert({
+      id: userId,
+      address,
+      encryptedKey,
+      imported: true
+    });
+
+    // Show success message and main menu
+    await ctx.reply(
+      `✅ Wallet imported successfully!\n\nAddress: \`${address}\``,
+      { parse_mode: 'Markdown' }
+    );
+    
+    return showMainMenu(ctx);
+  } catch (error) {
+    console.error('Private key input error:', error);
+    return ctx.reply('Sorry, something went wrong while importing your wallet. Please try again.');
+  }
+}
+
 module.exports = {
-  handleStart
+  handleStart,
+  handleCreateWallet,
+  handleImportWallet,
+  handlePrivateKeyInput
 }; 
