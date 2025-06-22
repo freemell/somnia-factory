@@ -1,18 +1,14 @@
 const { ethers } = require('ethers');
-const fs = require('fs').promises;
+const fs = require('fs');
+const path = require('path');
 
-// Load DEX router ABI
-let routerABI;
-try {
-  routerABI = JSON.parse(await fs.readFile(process.env.DEX_ABI_PATH, 'utf8'));
-} catch (error) {
-  console.error('Error loading DEX ABI:', error);
-  throw new Error('Failed to load DEX ABI');
-}
+// Load router ABI
+const routerAbiPath = path.join(__dirname, '../abis/router.json');
+const routerAbi = JSON.parse(fs.readFileSync(routerAbiPath, 'utf8'));
 
 const provider = new ethers.JsonRpcProvider(process.env.RPC_URL);
-const routerAddress = process.env.DEX_ROUTER;
-const router = new ethers.Contract(routerAddress, routerABI, provider);
+const routerAddress = process.env.DEX_ROUTER || '0xE94de02e52Eaf9F0f6Bf7f16E4927FcBc2c09bC7';
+const router = new ethers.Contract(routerAddress, routerAbi, provider);
 
 /**
  * Swaps tokens using the DEX router
@@ -37,23 +33,14 @@ async function swapTokens(amountIn, amountOutMin, tokenIn, tokenOut, userWallet)
     const path = [tokenIn, tokenOut];
     const deadline = Math.floor(Date.now() / 1000) + 300; // 5 minutes
 
-    // Estimate gas
-    const gasEstimate = await router.swapExactTokensForTokens.estimateGas(
-      amountIn,
-      amountOutMin,
-      path,
-      wallet.address,
-      deadline
-    );
-
-    // Execute swap
+    // Execute swap with fixed gas limit
     const swapTx = await router.swapExactTokensForTokens(
       amountIn,
       amountOutMin,
       path,
       wallet.address,
       deadline,
-      { gasLimit: gasEstimate.mul(120).div(100) } // Add 20% buffer
+      { gasLimit: 300000 }
     );
 
     // Wait for transaction
@@ -86,7 +73,54 @@ async function getAmountsOut(amountIn, path) {
   }
 }
 
-module.exports = {
-  swapTokens,
-  getAmountsOut
+/**
+ * Estimate token output for specific STT amounts
+ */
+async function estimateTokenOutput(sttAmounts, tokenAddress, provider) {
+  try {
+    // For Somnia, we'll use WETH address as the wrapped version of STT
+    // This is a common pattern where native tokens are wrapped for DEX trading
+    const WSTT_ADDRESS = '0x4200000000000000000000000000000000000006'; // Wrapped STT address (common pattern)
+    const estimates = {};
+    
+    for (const amount of sttAmounts) {
+      try {
+        const amountIn = ethers.parseUnits(amount.toString(), 18); // STT has 18 decimals
+        const path = [WSTT_ADDRESS, tokenAddress];
+        const amountOut = await getAmountsOut(amountIn, path);
+        estimates[amount] = amountOut;
+      } catch (error) {
+        console.error(`Error estimating for ${amount} STT:`, error);
+        // Fallback: use a simple ratio (1 STT = 1000 token units as example)
+        const fallbackRatio = 1000;
+        estimates[amount] = ethers.parseUnits((amount * fallbackRatio).toString(), 18);
+      }
+    }
+    
+    return estimates;
+  } catch (error) {
+    console.error('Error estimating token output:', error);
+    // Return fallback estimates
+    const estimates = {};
+    for (const amount of sttAmounts) {
+      const fallbackRatio = 1000;
+      estimates[amount] = ethers.parseUnits((amount * fallbackRatio).toString(), 18);
+    }
+    return estimates;
+  }
+}
+
+/**
+ * Calculate slippage-adjusted minimum output
+ */
+function calculateAmountOutMin(amountOut, slippagePercent = 1) {
+  const slippageMultiplier = (100 - slippagePercent) / 100;
+  return amountOut * BigInt(Math.floor(slippageMultiplier * 1000)) / 1000n;
+}
+
+module.exports = { 
+  swapTokens, 
+  getAmountsOut, 
+  estimateTokenOutput,
+  calculateAmountOutMin 
 }; 

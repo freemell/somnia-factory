@@ -1,4 +1,4 @@
-const { Telegraf, Markup } = require('telegraf');
+const { Markup } = require('telegraf');
 const { ethers } = require('ethers');
 const { getWalletForUser } = require('../utils/wallet');
 
@@ -9,6 +9,31 @@ const ERC20_ABI = [
   'function symbol() view returns (string)'
 ];
 
+// Define SOM and USDT token addresses as constants
+const SOM_TOKEN_ADDRESS = '0x...'; // Replace with actual SOM token address
+const USDT_TOKEN_ADDRESS = '0x...'; // Replace with actual USDT token address
+
+/**
+ * Gets token balance and symbol for a wallet
+ */
+async function getTokenBalanceAndSymbol(wallet, tokenAddress) {
+  try {
+    const tokenContract = new ethers.Contract(tokenAddress, ERC20_ABI, wallet.provider);
+    const [balance, decimals, symbol] = await Promise.all([
+      tokenContract.balanceOf(wallet.address),
+      tokenContract.decimals(),
+      tokenContract.symbol()
+    ]);
+    return {
+      balance: ethers.formatUnits(balance, decimals),
+      symbol
+    };
+  } catch (error) {
+    console.error('Error getting token balance:', error);
+    return { balance: '0', symbol: '' };
+  }
+}
+
 /**
  * Balance command handler
  */
@@ -16,20 +41,21 @@ async function handleBalance(ctx) {
   try {
     // Get user's wallet
     const wallet = await getWalletForUser(ctx.from.id);
-    
-    // Get native token balance
+
+    // Get native token balance (SOM native)
     const nativeBalance = await wallet.provider.getBalance(wallet.address);
-    
+    const formattedNative = ethers.formatEther(nativeBalance);
+
     // Get token balances
-    const somBalance = await getTokenBalance(wallet, process.env.SOM_TOKEN_ADDRESS);
-    const usdtBalance = await getTokenBalance(wallet, process.env.USDT_TOKEN_ADDRESS);
-    
+    const som = await getTokenBalanceAndSymbol(wallet, SOM_TOKEN_ADDRESS);
+    const usdt = await getTokenBalanceAndSymbol(wallet, USDT_TOKEN_ADDRESS);
+
     // Format message
     const message = `💰 Your Balances:\n\n` +
-      `SOM: ${ethers.formatEther(nativeBalance)}\n` +
-      `SOM Token: ${somBalance}\n` +
-      `USDT: ${usdtBalance}`;
-    
+      `SOM (native): ${formattedNative}\n` +
+      `${som.symbol}: ${som.balance}\n` +
+      `${usdt.symbol}: ${usdt.balance}`;
+
     await ctx.reply(
       message,
       Markup.inlineKeyboard([
@@ -43,21 +69,6 @@ async function handleBalance(ctx) {
   }
 }
 
-/**
- * Gets token balance for a wallet
- */
-async function getTokenBalance(wallet, tokenAddress) {
-  try {
-    const tokenContract = new ethers.Contract(tokenAddress, ERC20_ABI, wallet.provider);
-    const balance = await tokenContract.balanceOf(wallet.address);
-    const decimals = await tokenContract.decimals();
-    return ethers.formatUnits(balance, decimals);
-  } catch (error) {
-    console.error('Error getting token balance:', error);
-    return '0';
-  }
-}
-
 module.exports = {
   handleBalance
-}; 
+};

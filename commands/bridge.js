@@ -203,7 +203,7 @@ async function handleBridgeAmount(ctx) {
   await ctx.editMessageText(
     `🌉 *Bridge ${amount} ${token.toUpperCase()}*\n\n` +
     `Send ${amount} ${token.toUpperCase()} to this Sepolia address:\n\n` +
-    `\`${process.env.BRIDGE_RECEIVER_ADDRESS}\`\n\n` +
+    `\`${process.env.SEPOLIA_RECEIVER}\`\n\n` +
     'Once you\'ve sent the tokens, click the button below to proceed.',
     {
       parse_mode: 'Markdown',

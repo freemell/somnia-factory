@@ -8,12 +8,12 @@ const sepoliaProvider = new ethers.JsonRpcProvider(process.env.ETH_RPC_URL);
 const somniaProvider = new ethers.JsonRpcProvider(process.env.RPC_URL);
 
 // Bridge receiver wallet (for testnet)
-const bridgeWallet = new ethers.Wallet(process.env.BRIDGE_PRIVATE_KEY, somniaProvider);
+const bridgeWallet = new ethers.Wallet(process.env.DEPLOYER_PRIVATE_KEY, somniaProvider);
 
 // Initialize providers for different testnets
-const sepoliaProviderTestnet = new ethers.providers.JsonRpcProvider(process.env.SEPOLIA_RPC_URL);
-const mumbaiProviderTestnet = new ethers.providers.JsonRpcProvider(process.env.MUMBAI_RPC_URL);
-const bscProviderTestnet = new ethers.providers.JsonRpcProvider(process.env.BSC_TESTNET_RPC);
+const sepoliaProviderTestnet = new ethers.JsonRpcProvider(process.env.SEPOLIA_RPC_URL);
+const mumbaiProviderTestnet = new ethers.JsonRpcProvider(process.env.MUMBAI_RPC_URL);
+const bscProviderTestnet = new ethers.JsonRpcProvider(process.env.BSC_TESTNET_RPC);
 
 // Token conversion rates (can be adjusted)
 const CONVERSION_RATES = {
@@ -91,7 +91,7 @@ async function handleBridgeTransfer(userId, token, amount) {
  */
 async function checkSepoliaTransfer(fromAddress, token, amount) {
   try {
-    const bridgeAddress = process.env.BRIDGE_RECEIVER_ADDRESS;
+    const bridgeAddress = process.env.SEPOLIA_RECEIVER;
     const amountWei = ethers.parseUnits(amount, 18);
     
     // Get recent blocks

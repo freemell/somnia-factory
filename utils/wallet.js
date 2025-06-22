@@ -1,8 +1,9 @@
 const { ethers } = require('ethers');
 const crypto = require('crypto');
+const { getWallet } = require('./database');
 
-// Encryption key for wallet encryption (in production, this should be stored securely)
-const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY || crypto.randomBytes(32).toString('hex');
+// Use a static encryption key for wallet encryption (in production, use a secure method)
+const ENCRYPTION_KEY = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
 
 /**
  * Creates a new wallet and returns its address and encrypted private key
@@ -94,21 +95,17 @@ async function decryptPrivateKey(encryptedKey) {
  */
 async function getWalletForUser(userId) {
   try {
-    const { data: user } = await supabase
-      .from('users')
-      .select('encryptedKey')
-      .eq('id', userId)
-      .single();
-
-    if (!user) {
-      throw new Error('User wallet not found');
+    const walletData = await getWallet(userId);
+    
+    if (!walletData) {
+      return null; // Return null instead of throwing error
     }
 
-    const privateKey = await decryptPrivateKey(user.encryptedKey);
+    const privateKey = await decryptPrivateKey(walletData.private_key);
     return new ethers.Wallet(privateKey);
   } catch (error) {
     console.error('Error getting user wallet:', error);
-    throw new Error('Failed to get user wallet');
+    return null; // Return null instead of throwing error
   }
 }
 

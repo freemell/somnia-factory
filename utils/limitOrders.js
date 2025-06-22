@@ -1,33 +1,43 @@
 const { supabase } = require('../db/supabase');
-const { isPriceAtTarget } = require('./priceFetcher');
-const { swapTokens } = require('./dex');
+const { ethers } = require('ethers');
+const { 
+  saveLimitOrder, 
+  getLimitOrders, 
+  updateLimitOrder 
+} = require('./database');
+const { swapTokens, getAmountsOut } = require('./dex');
 const { getWalletForUser } = require('./wallet');
 const { generateTradeImage } = require('./imageGen');
+
+// Testnet token addresses
+const TOKENS = {
+  'USDT.g': '0x1234567890123456789012345678901234567890',
+  'NIA': '0x2345678901234567890123456789012345678901',
+  'PING': '0x3456789012345678901234567890123456789012',
+  'PONG': '0x4567890123456789012345678901234567890123'
+};
 
 /**
  * Creates a new limit order
  */
-async function createLimitOrder(userId, tokenIn, tokenOut, amount, price, isAbove = true) {
+async function createLimitOrder(userId, tokenIn, tokenOut, amount, targetPrice, orderType = 'buy') {
   try {
-    const { data, error } = await supabase
-      .from('orders')
-      .insert({
-        user_id: userId,
-        token_in: tokenIn,
-        token_out: tokenOut,
-        amount,
-        price,
-        status: 'pending'
-      })
-      .select()
-      .single();
+    const orderData = {
+      user_id: userId,
+      token_in: tokenIn,
+      token_out: tokenOut,
+      amount: amount,
+      target_price: targetPrice,
+      order_type: orderType, // 'buy' or 'sell'
+      status: 'pending'
+    };
 
-    if (error) throw error;
-
+    const order = await saveLimitOrder(orderData);
+    
     // Start monitoring the order
-    monitorLimitOrder(data.id);
+    setTimeout(() => monitorLimitOrder(order.id), 5000); // Check after 5 seconds
 
-    return data;
+    return order;
   } catch (error) {
     console.error('Error creating limit order:', error);
     throw new Error('Failed to create limit order');
@@ -39,91 +49,89 @@ async function createLimitOrder(userId, tokenIn, tokenOut, amount, price, isAbov
  */
 async function monitorLimitOrder(orderId) {
   try {
+    // Get the order
     const { data: order } = await supabase
-      .from('orders')
+      .from('limit_orders')
       .select('*')
       .eq('id', orderId)
       .single();
 
     if (!order || order.status !== 'pending') return;
 
-    // Check if price target is reached
-    const targetReached = await isPriceAtTarget(
-      order.token_in,
-      order.price,
-      order.is_above
-    );
+    // Get current price
+    const provider = new ethers.JsonRpcProvider(process.env.RPC_URL);
+    const path = [order.token_in, order.token_out];
+    const amountIn = ethers.parseUnits('1', 18); // 1 token for price calculation
+    
+    try {
+      const amountOut = await getAmountsOut(amountIn, path);
+      const currentPrice = parseFloat(ethers.formatUnits(amountOut, 18));
+      const targetPrice = parseFloat(order.target_price);
 
-    if (targetReached) {
-      // Get user's wallet
-      const wallet = await getWalletForUser(order.user_id);
-
-      // Execute the trade
-      const result = await swapTokens(
-        order.amount,
-        0, // No minimum amount for limit orders
-        order.token_in,
-        order.token_out,
-        wallet
-      );
-
-      if (result.success) {
-        // Update order status
-        await supabase
-          .from('orders')
-          .update({
-            status: 'executed',
-            executed_at: new Date().toISOString()
-          })
-          .eq('id', orderId);
-
-        // Generate trade image
-        const imagePath = await generateTradeImage({
-          tokenIn: order.token_in,
-          tokenOut: order.token_out,
-          amount: order.amount,
-          price: order.price,
-          txHash: result.txHash
-        });
-
-        // Send notification to user
-        // Note: You'll need to implement a way to send messages to users
-        // This could be through a message queue or direct Telegram API call
-        await sendTradeNotification(order.user_id, {
-          success: true,
-          imagePath,
-          txHash: result.txHash
-        });
-      } else {
-        // Update order status to failed
-        await supabase
-          .from('orders')
-          .update({
-            status: 'failed',
-            executed_at: new Date().toISOString()
-          })
-          .eq('id', orderId);
-
-        // Send failure notification
-        await sendTradeNotification(order.user_id, {
-          success: false,
-          error: result.error
-        });
+      // Check if conditions are met
+      let shouldExecute = false;
+      if (order.order_type === 'buy' && currentPrice <= targetPrice) {
+        shouldExecute = true;
+      } else if (order.order_type === 'sell' && currentPrice >= targetPrice) {
+        shouldExecute = true;
       }
-    } else {
-      // Continue monitoring
-      setTimeout(() => monitorLimitOrder(orderId), 60000); // Check every minute
+
+      if (shouldExecute) {
+        // Execute the order
+        const wallet = await getWalletForUser(order.user_id);
+        if (!wallet) {
+          await updateLimitOrder(orderId, { 
+            status: 'failed', 
+            error: 'Wallet not found' 
+          });
+          return;
+        }
+
+        const result = await swapTokens(
+          ethers.parseUnits(order.amount, 18),
+          0, // No minimum amount for limit orders
+          order.token_in,
+          order.token_out,
+          wallet
+        );
+
+        if (result.success) {
+          // Mark as executed
+          await updateLimitOrder(orderId, { 
+            status: 'executed', 
+            tx_hash: result.txHash,
+            executed_at: new Date().toISOString()
+          });
+
+          // Generate and send notification image
+          const imagePath = await generateTradeImage({
+            tokenIn: order.token_in,
+            tokenOut: order.token_out,
+            amount: order.amount,
+            price: currentPrice.toString(),
+            txHash: result.txHash,
+            type: 'limit_' + order.order_type
+          });
+
+          // Note: In a real implementation, you'd send this to the user via Telegram
+          console.log(`Limit order ${orderId} executed successfully: ${result.txHash}`);
+        } else {
+          await updateLimitOrder(orderId, { 
+            status: 'failed', 
+            error: result.error 
+          });
+        }
+      } else {
+        // Continue monitoring (check again in 30 seconds)
+        setTimeout(() => monitorLimitOrder(orderId), 30000);
+      }
+    } catch (error) {
+      console.error('Error checking price for limit order:', error);
+      // Continue monitoring despite error
+      setTimeout(() => monitorLimitOrder(orderId), 60000);
     }
   } catch (error) {
     console.error('Error monitoring limit order:', error);
-    // Update order status to failed
-    await supabase
-      .from('orders')
-      .update({
-        status: 'failed',
-        executed_at: new Date().toISOString()
-      })
-      .eq('id', orderId);
   }
 }
 
@@ -132,15 +140,7 @@ async function monitorLimitOrder(orderId) {
  */
 async function getUserLimitOrders(userId) {
   try {
-    const { data, error } = await supabase
-      .from('orders')
-      .select('*')
-      .eq('user_id', userId)
-      .eq('status', 'pending')
-      .order('created_at', { ascending: false });
-
-    if (error) throw error;
-    return data;
+    return await getLimitOrders(userId);
   } catch (error) {
     console.error('Error getting user limit orders:', error);
     throw new Error('Failed to get limit orders');
@@ -152,27 +152,71 @@ async function getUserLimitOrders(userId) {
  */
 async function cancelLimitOrder(orderId, userId) {
   try {
-    const { data, error } = await supabase
-      .from('orders')
-      .update({
-        status: 'cancelled',
-        executed_at: new Date().toISOString()
-      })
-      .eq('id', orderId)
-      .eq('user_id', userId)
-      .select()
-      .single();
+    const result = await updateLimitOrder(orderId, {
+      status: 'cancelled',
+      cancelled_at: new Date().toISOString()
+    });
 
-    if (error) throw error;
-    return data;
+    return result;
   } catch (error) {
     console.error('Error cancelling limit order:', error);
     throw new Error('Failed to cancel limit order');
   }
 }
 
+/**
+ * Gets limit order by ID
+ */
+async function getLimitOrder(orderId) {
+  try {
+    const { data, error } = await supabase
+      .from('limit_orders')
+      .select('*')
+      .eq('id', orderId)
+      .single();
+
+    if (error) throw error;
+    return data;
+  } catch (error) {
+    console.error('Error getting limit order:', error);
+    throw new Error('Failed to get limit order');
+  }
+}
+
+/**
+ * Background process to check all pending limit orders
+ */
+async function checkAllLimitOrders() {
+  try {
+    const { data: orders, error } = await supabase
+      .from('limit_orders')
+      .select('*')
+      .eq('status', 'pending');
+
+    if (error) throw error;
+
+    for (const order of orders) {
+      monitorLimitOrder(order.id);
+    }
+  } catch (error) {
+    console.error('Error checking all limit orders:', error);
+  }
+}
+
+/**
+ * Start background monitoring
+ */
+function startLimitOrderMonitoring() {
+  // Check all orders every 5 minutes
+  setInterval(checkAllLimitOrders, 5 * 60 * 1000);
+  console.log('Limit order monitoring started');
+}
+
 module.exports = {
   createLimitOrder,
   getUserLimitOrders,
-  cancelLimitOrder
+  cancelLimitOrder,
+  getLimitOrder,
+  startLimitOrderMonitoring,
+  checkAllLimitOrders
 }; 

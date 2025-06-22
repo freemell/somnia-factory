@@ -4,6 +4,10 @@ const { getTokenInfo } = require('../utils/caDetector');
 const { swapTokens } = require('../utils/dex');
 const { generateTradeImage } = require('../utils/imageGen');
 const { tokenInfoButtons, persistentButtons } = require('./inlineButtons');
+const { getTokenMetadata } = require('../utils/tokenInfo');
+
+// Define SOM token address as a constant
+const SOM_TOKEN_ADDRESS = '0x...'; // Replace with actual SOM token address
 
 /**
  * Handles contract address input
@@ -70,7 +74,7 @@ async function handleBuyAmount(ctx) {
     const result = await swapTokens(
       ethers.parseUnits(amount, 18),
       0, // No minimum amount
-      process.env.SOM_TOKEN_ADDRESS,
+      SOM_TOKEN_ADDRESS,
       tokenAddress,
       wallet
     );
@@ -120,13 +124,7 @@ async function handleBuyAmount(ctx) {
  */
 function formatTokenInfo(tokenInfo) {
   return `*${tokenInfo.name} | ${tokenInfo.symbol} | ${tokenInfo.address.slice(0, 6)}...${tokenInfo.address.slice(-4)}*\n\n` +
-    `Price: $${tokenInfo.price}\n` +
-    `5m: ${tokenInfo.change5m > 0 ? '+' : ''}${tokenInfo.change5m}%, ` +
-    `1h: ${tokenInfo.change1h > 0 ? '+' : ''}${tokenInfo.change1h}%, ` +
-    `24h: ${tokenInfo.change24h > 0 ? '+' : ''}${tokenInfo.change24h}%\n` +
-    `Market Cap: $${formatNumber(tokenInfo.marketCap)}\n` +
-    `Price Impact (5 SOM): ${tokenInfo.priceImpact}%\n` +
-    `Wallet Balance: ${tokenInfo.walletBalance} SOM`;
+    `Wallet Balance: ${tokenInfo.walletBalance} ${tokenInfo.symbol}`;
 }
 
 /**
