@@ -1,20 +1,27 @@
 const { Markup } = require('telegraf');
 
-// Main menu buttons - 3x3 grid layout
+// Main menu buttons - 2-3-2-3-2 layout (5 rows total)
 const mainMenuButtons = [
   [
     Markup.button.callback('🔄 Buy', 'buy'),
-    Markup.button.callback('💰 Fund', 'fund'),
-    Markup.button.callback('🌉 Bridge', 'bridge')
+    Markup.button.callback('💰 Fund', 'fund')
   ],
   [
-    Markup.button.callback('📊 Trade', 'trade'),
+    Markup.button.callback('🌉 Bridge', 'bridge'),
+    Markup.button.callback('📤 Withdraw', 'withdraw'),
+    Markup.button.callback('⚙️ Options', 'options')
+  ],
+  [
     Markup.button.callback('⏱️ Limits', 'limits'),
     Markup.button.callback('📈 History', 'history')
   ],
   [
+    Markup.button.callback('👥 Referral', 'referral'),
     Markup.button.callback('👛 Wallet', 'wallet'),
-    Markup.button.callback('🔔 Alerts', 'alerts'),
+    Markup.button.callback('🔔 Alerts', 'alerts')
+  ],
+  [
+    Markup.button.callback('👁️ Watchlist', 'watchlist'),
     Markup.button.callback('❓ Help', 'help')
   ]
 ];
@@ -189,6 +196,38 @@ const walletButtons = [
   ]
 ];
 
+// Referral menu buttons
+const referralButtons = [
+  [
+    Markup.button.callback('🔗 Copy Referral Link', 'copy_referral_link'),
+    Markup.button.callback('📋 My Referrals', 'my_referrals')
+  ],
+  [
+    Markup.button.callback('🏠 Menu', 'main_menu')
+  ]
+];
+
+// Watchlist menu buttons
+const watchlistButtons = [
+  [
+    Markup.button.callback('➕ Add Token', 'add_watchlist_token'),
+    Markup.button.callback('➖ Remove Token', 'remove_watchlist_token')
+  ],
+  [
+    Markup.button.callback('🏠 Menu', 'main_menu')
+  ]
+];
+
+const optionsMenuButtons = [
+  [
+    Markup.button.callback('⚙️ Settings', 'settings'),
+    Markup.button.callback('🌾 Farm', 'farm')
+  ],
+  [
+    Markup.button.callback('🏠 Menu', 'main_menu')
+  ]
+];
+
 module.exports = {
   mainMenuButtons,
   tokenInfoButtons,
@@ -199,5 +238,8 @@ module.exports = {
   alertTypeButtons,
   notificationButtons,
   settingsButtons,
-  walletButtons
+  walletButtons,
+  referralButtons,
+  watchlistButtons,
+  optionsMenuButtons
 }; 

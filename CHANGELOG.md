@@ -151,4 +151,18 @@ All notable changes to the Somnia Trading Bot will be documented in this file.
 
 ---
 
-For detailed setup instructions, see the [README.md](README.md) file. 
+For detailed setup instructions, see the [README.md](README.md) file.
+
+## [Unreleased]
+
+### Fixed
+- **DEX Integration:** Replaced the DEX ABI in `utils/abi.json` with a standard combined Uniswap V2 Factory and Router ABI to ensure correct contract function calls.
+- **Liquidity Check:** Updated `utils/dex.js` to properly use the factory contract's `getPair` method to validate if a liquidity pool exists for a token pair before attempting to get quotes or execute swaps. This prevents `execution reverted` errors on illiquid pairs.
+- **Ethers v6:** Ensured all `ethers` calls in `utils/dex.js` use the correct v6 syntax (`new JsonRpcProvider()` instead of `new ethers.providers.JsonRpcProvider()`).
+- **Trade Command Flow:** Reworked `commands/trade.js` to handle trades via direct text input of a token contract address.
+- **Telegram Button Errors:** Fixed the `BUTTON_DATA_INVALID` error by correcting the creation of callback data for all buttons in the trade flow. The bot now correctly handles `buy`/`sell` actions and amount selections.
+- **Error Handling:** Improved error handling in the trade flow to provide clear feedback to the user when a token is invalid or has no liquidity.
+
+### Added
+- **Dynamic Trade UI:** The trade command now dynamically generates buy/sell and amount buttons after validating the entered token address and its liquidity.
+- **Changelog:** Added this `CHANGELOG.md` to track changes to the project. 

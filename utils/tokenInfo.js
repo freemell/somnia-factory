@@ -1,4 +1,4 @@
-const { ethers } = require('ethers');
+const { Contract } = require('ethers');
 
 const cache = {};
 
@@ -13,18 +13,28 @@ const erc20Abi = [
 ];
 
 async function getTokenMetadata(tokenAddress, provider) {
+  if (!/^0x[a-fA-F0-9]{40}$/.test(tokenAddress)) {
+    console.error('Invalid address format:', tokenAddress);
+    return { address: tokenAddress, valid: false, error: '❌ Invalid token address or not deployed on Somnia Testnet' };
+  }
   try {
-    const token = new ethers.Contract(tokenAddress, erc20Abi, provider);
+    const contract = new Contract(
+      tokenAddress,
+      ['function name() view returns (string)', 'function symbol() view returns (string)', 'function decimals() view returns (uint8)'],
+      provider
+    );
     const [name, symbol, decimals] = await Promise.all([
-      token.name(),
-      token.symbol(),
-      token.decimals()
+      contract.name().catch(() => 'Unknown'),
+      contract.symbol().catch(() => 'Unknown'),
+      contract.decimals().catch(() => 18)
     ]);
-
-    return { name, symbol, decimals };
+    if (name === 'Unknown' && symbol === 'Unknown') {
+      throw new Error('Invalid contract');
+    }
+    return { address: tokenAddress, name, symbol, decimals, valid: true };
   } catch (error) {
-    console.error("Failed to fetch token metadata:", error);
-    throw new Error('Invalid or undeployed token on Somnia Testnet');
+    console.error('getTokenMetadata failed:', { tokenAddress, error: error.message });
+    return { address: tokenAddress, valid: false, error: '❌ Invalid token address or not deployed on Somnia Testnet' };
   }
 }
 
@@ -38,7 +48,7 @@ async function getTokenMetadataCached(tokenAddress, provider) {
 
 async function getTokenBalance(tokenAddress, userAddress, provider) {
   try {
-    const token = new ethers.Contract(tokenAddress, erc20Abi, provider);
+    const token = new Contract(tokenAddress, erc20Abi, provider);
     const balance = await token.balanceOf(userAddress);
     return balance;
   } catch (error) {

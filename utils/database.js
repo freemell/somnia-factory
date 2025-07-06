@@ -422,6 +422,49 @@ async function getUserSettings(userId) {
   }
 }
 
+// Watchlist functions
+async function addTokenToWatchlist(userId, tokenAddress) {
+  try {
+    const { error } = await supabase
+      .from('watchlist')
+      .insert({ user_id: userId, token_address: tokenAddress, created_at: new Date().toISOString() });
+    if (error) throw error;
+    return { success: true };
+  } catch (error) {
+    console.error('Error adding token to watchlist:', error);
+    return { success: false, error };
+  }
+}
+
+async function removeTokenFromWatchlist(userId, tokenAddress) {
+  try {
+    const { error } = await supabase
+      .from('watchlist')
+      .delete()
+      .eq('user_id', userId)
+      .eq('token_address', tokenAddress);
+    if (error) throw error;
+    return { success: true };
+  } catch (error) {
+    console.error('Error removing token from watchlist:', error);
+    return { success: false, error };
+  }
+}
+
+async function getWatchlist(userId) {
+  try {
+    const { data, error } = await supabase
+      .from('watchlist')
+      .select('token_address')
+      .eq('user_id', userId);
+    if (error) throw error;
+    return data.map(row => row.token_address);
+  } catch (error) {
+    console.error('Error fetching watchlist:', error);
+    return [];
+  }
+}
+
 module.exports = {
   supabase,
   createUser,
@@ -439,5 +482,8 @@ module.exports = {
   createAlert,
   getAlerts,
   saveUserSettings,
-  getUserSettings
+  getUserSettings,
+  addTokenToWatchlist,
+  removeTokenFromWatchlist,
+  getWatchlist
 }; 

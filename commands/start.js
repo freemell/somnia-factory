@@ -4,6 +4,7 @@ const { createUser, createWallet, getUser, getWallet } = require('../utils/datab
 const { showMainMenu, showWalletChoiceMenu } = require('../utils/menus');
 const { getSTTBalance } = require('../utils/tokenInfo');
 const { ethers } = require('ethers');
+const { mainMenuButtons } = require('../handlers/inlineButtons');
 
 /**
  * Check if a user exists in the database
@@ -46,53 +47,8 @@ async function handleStart(ctx) {
       // === Wallet already exists — show home/dashboard ===
       console.log(`User ${userId} already has wallet, showing dashboard`);
       
-      const wallet = await getWalletForUser(userId);
-      if (!wallet) {
-        // Fallback to wallet choice if wallet retrieval fails
-        return showWalletChoiceMenu(ctx);
-      }
-
-      // Get STT balance with error handling
-      let sttBalanceFormatted = '0.000';
-      try {
-        const provider = new ethers.JsonRpcProvider(process.env.RPC_URL);
-        const sttBalance = await getSTTBalance(wallet.address, provider);
-        sttBalanceFormatted = ethers.formatEther(sttBalance);
-      } catch (balanceError) {
-        console.error('Error fetching STT balance:', balanceError);
-        // Keep '0.000' on error
-      }
-
-      const message = `*Somnia ·* 🧠\n`+
-                      `\`${wallet.address}\` (Tap to copy)\n` +
-                      `Balance: ${parseFloat(sttBalanceFormatted).toFixed(4)} STT\n\n` +
-                      `—\n\n`+
-                      `Somnia is a lightning-fast L2 testnet for Insomniac traders. Gasless. Composable. Built for speed.\n\n`+
-                      `Join our [Telegram group](https://t.me/+Apyc5vV4mExjNjA0) and follow us on [Twitter](https://x.com/insomniacs_clvb)\n\n`+
-                      `⚠️ Security tip: Don't trust links or airdrops from strangers. Always verify.`;
-
-      const mainMenuGrid = {
-        inline_keyboard: [
-          [{ text: '💸 Buy', callback_data: 'buy' }, { text: '💵 Sell', callback_data: 'sell' }],
-          [{ text: '📊 Positions', callback_data: 'positions' }, { text: '🔄 Refresh', callback_data: 'refresh' }],
-          [{ text: '⚙️ Settings', callback_data: 'settings' }, { text: '📥 Withdraw', callback_data: 'withdraw' }]
-        ]
-      };
-      
-      if(ctx.session) {
-        ctx.session.currentScreen = 'main_menu';
-      }
-
-      // Using reply instead of editMessageText for /start command
-      await ctx.reply(
-        message,
-        {
-          parse_mode: 'Markdown',
-          reply_markup: mainMenuGrid,
-          disable_web_page_preview: true
-        }
-      );
-
+      // Use showMainMenu instead of hardcoded layout
+      return showMainMenu(ctx);
     } else {
       // === First time user — show Create/Import options ===
       console.log(`User ${userId} is new, showing wallet choice menu`);
@@ -176,7 +132,7 @@ async function handleCreateWallet(ctx) {
     }
 
     console.log(`Sending welcome message`);
-    // Show welcome message with wallet info
+    // Show welcome message with wallet info and use showMainMenu for consistent layout
     await ctx.reply(
       `👋 *Welcome to SomniaBot*\n\n` +
       `Your wallet has been successfully created and is now connected to the Somnia Testnet (Chain ID: 50312).\n\n` +
@@ -187,16 +143,11 @@ async function handleCreateWallet(ctx) {
       `• Swap tokens directly\n` +
       `• Set limit orders\n` +
       `• Monitor your positions\n` +
-      `• Bridge from testnets like Sepolia`,
+      `• Bridge from testnets like Sepolia\n\n` +
+      `Somnia is a lightning-fast L1 testnet for Insomniac traders. Gas is subsidized for testnet trades.`,
       {
         parse_mode: 'Markdown',
-        reply_markup: {
-           inline_keyboard: [
-            [{ text: '💸 Buy', callback_data: 'buy' }, { text: '💵 Sell', callback_data: 'sell' }],
-            [{ text: '📊 Positions', callback_data: 'positions' }, { text: '🔄 Refresh', callback_data: 'refresh' }],
-            [{ text: '⚙️ Settings', callback_data: 'settings' }, { text: '📥 Withdraw', callback_data: 'withdraw' }]
-          ]
-        }
+        ...Markup.inlineKeyboard(mainMenuButtons)
       }
     );
     console.log(`Welcome message sent successfully`);
@@ -301,14 +252,11 @@ async function handlePrivateKeyInput(ctx) {
       `• Swap tokens directly\n` +
       `• Set limit orders\n` +
       `• Monitor your positions\n` +
-      `• Bridge from testnets like Sepolia`,
+      `• Bridge from testnets like Sepolia\n\n` +
+      `Somnia is a lightning-fast L1 testnet for Insomniac traders. Gas is subsidized for testnet trades.`,
       {
         parse_mode: 'Markdown',
-        ...Markup.inlineKeyboard([
-          [{ text: '💸 Buy', callback_data: 'buy' }, { text: '💵 Sell', callback_data: 'sell' }],
-          [{ text: '📊 Positions', callback_data: 'positions' }, { text: '📈 Limit Orders', callback_data: 'limit' }],
-          [{ text: '🌉 Bridge', callback_data: 'bridge' }, { text: '🔄 Refresh', callback_data: 'refresh' }]
-        ])
+        ...Markup.inlineKeyboard(mainMenuButtons)
       }
     );
 

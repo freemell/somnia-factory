@@ -1,71 +1,67 @@
 const { Markup } = require('telegraf');
 const { getWalletForUser } = require('./wallet');
 const { ethers } = require('ethers');
-
-/**
- * Format wallet address for display (first 8 + last 6 chars)
- */
-function formatWalletAddress(address) {
-  if (!address) return '';
-  return `${address.slice(0, 8)}...${address.slice(-6)}`;
-}
+const { mainMenuButtons } = require('../handlers/inlineButtons');
 
 /**
  * Show the main menu interface for returning users
  */
 async function showMainMenu(ctx) {
   try {
-    // Get user's wallet and balance
+    console.log('🔍 [DEBUG] showMainMenu called for user:', ctx.from.id);
+    
+    // Get user's wallet
     const wallet = await getWalletForUser(ctx.from.id);
     
     if (!wallet) {
-      // No wallet found, show wallet creation menu
+      console.log('🔍 [DEBUG] No wallet found, showing wallet choice menu');
       return showWalletChoiceMenu(ctx);
     }
 
-    const balance = await wallet.getBalance();
+    console.log('🔍 [DEBUG] Wallet found, address:', wallet.address);
 
-    const welcomeMessage = 
-      '🔗 Chain: Somnia · STT\n' +
-      `📬 Wallet: \`${formatWalletAddress(wallet.address)}\`\n\n` +
-      `💰 Balance: *${parseFloat(ethers.formatUnits(balance, 18)).toFixed(3)} STT*\n\n` +
+    let balanceFormatted = 'N/A';
+    try {
+        const provider = new ethers.JsonRpcProvider(process.env.RPC_URL);
+        const balance = await provider.getBalance(wallet.address);
+        balanceFormatted = parseFloat(ethers.formatUnits(balance, 18)).toFixed(3);
+        console.log('🔍 [DEBUG] Wallet balance:', balanceFormatted);
+    } catch (rpcError) {
+        console.error('🔍 [DEBUG] Could not fetch balance due to RPC error:', rpcError.shortMessage || rpcError.message);
+        balanceFormatted = 'N/A \\(RPC Down\\)';
+    }
+    
+    // Helper to escape MarkdownV2 special characters
+    function escapeMDV2(text) {
+      return String(text).replace(/[\\_\*\[\]\(\)~`>#+\-=|{}.!]/g, '\\$&');
+    }
+
+    const walletAddress = escapeMDV2(wallet.address);
+    const balanceValue = escapeMDV2(balanceFormatted);
+
+    const welcomeMessage =
+      '🔗 *Chain:* Somnia · STT\n' +
+      '📬 *Wallet:* \\`' + walletAddress + '\\`\n\n' +
+      '💰 *Balance:* ' + balanceValue + ' STT\n\n' +
       '—\n\n' +
-      '🔄 Tap *Refresh* to update your current balance.\n\n' +
-      '📢 Join the Insomniacs Telegram: @InsomniaHQ\n' +
-      'Follow updates on X: https://x.com/InsomniaTestnet\n\n' +
-      '💡 You can reuse the *same wallet and settings* across all our testnet bots — optimized for Somnia speed.\n\n' +
-      '⚠️ Never click unknown links in ads or popups.\n' +
-      'Insomnia Bot will never ask for your private key.';
+      '🔄 Tap *Refresh* to update your current balance\\.\n\n' +
+      '💡 You can reuse the *same wallet and settings* across all our testnet bots — optimized for Somnia speed\\.\n\n' +
+      '⚡️ Somnia is a lightning\\-fast L1 testnet for Insomniac traders\\. Gas is subsidized for testnet trades\\.\n\n' +
+      '⚠️ Never click unknown links in ads or popups\\.\n' +
+      'Insomnia Bot will never ask for your private key\\.';
 
-    const mainMenuButtons = [
-      [
-        Markup.button.callback('🔄 Buy', 'buy'),
-        Markup.button.callback('💰 Fund', 'fund'),
-        Markup.button.callback('🌉 Bridge', 'bridge')
-      ],
-      [
-        Markup.button.callback('📊 Trade', 'trade'),
-        Markup.button.callback('⏱️ Limits', 'limits'),
-        Markup.button.callback('📈 History', 'history')
-      ],
-      [
-        Markup.button.callback('👛 Wallet', 'wallet'),
-        Markup.button.callback('🔔 Alerts', 'alerts'),
-        Markup.button.callback('❓ Help', 'help')
-      ]
-    ];
+    console.log('🔍 [DEBUG] Using mainMenuButtons from inlineButtons.js');
+    console.log('🔍 [DEBUG] mainMenuButtons structure:', JSON.stringify(mainMenuButtons, null, 2));
 
-    return ctx.reply(
+    return ctx.replyWithMarkdownV2(
       welcomeMessage,
       {
-        parse_mode: 'Markdown',
         ...Markup.inlineKeyboard(mainMenuButtons)
       }
     );
   } catch (error) {
-    console.error('Show main menu error:', error);
-    // If there's an error, show wallet creation menu
-    return showWalletChoiceMenu(ctx);
+    console.error('🔍 [DEBUG] Show main menu error (outer catch):', error);
+    return ctx.reply('An unexpected error occurred. Please try again later.');
   }
 }
 
@@ -175,4 +171,4 @@ module.exports = {
   renderBuyMenu,
   renderInvalidTokenMessage,
   renderSwapConfirmation
-}; 
+};

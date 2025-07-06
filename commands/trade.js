@@ -1,11 +1,13 @@
 const { ethers } = require('ethers');
 const { Markup } = require('telegraf');
 const { getWalletForUser } = require('../utils/wallet');
-const { swapTokens, getAmountsOut, calculateAmountOutMin } = require('../utils/dex');
+const { swapTokens, getAmountsOut, calculateAmountOutMin, validatePair } = require('../utils/dex');
 const { generateTradeImage } = require('../utils/imageGen');
 const { getTokenMetadata } = require('../utils/tokenInfo');
 const { saveTrade, getTradeHistory } = require('../utils/database');
 const { mainMenuButtons, tradeActionButtons, persistentButtons } = require('../handlers/inlineButtons');
+const { getWallet, getTokenBalance, getChainBalance } = require('../utils/walletManager');
+const { JsonRpcProvider, parseUnits, formatUnits } = require('ethers');
 
 // Testnet token addresses
 const TOKENS = {
@@ -150,16 +152,15 @@ async function handleAmountSelection(ctx) {
     
     // Calculate amounts
     const amountIn = ethers.parseUnits(amount, tokenInfo.decimals);
-    const path = action === 'buy' ? ['USDT.g', tokenAddress] : [tokenAddress, 'USDT.g'];
-    
+    const WSTT = process.env.WETH_ADDRESS;
+    const path = action === 'buy' ? [WSTT, tokenAddress] : [tokenAddress, WSTT];
     try {
       const amountOut = await getAmountsOut(amountIn, path);
       const amountOutMin = calculateAmountOutMin(amountOut, 1); // 1% slippage
-      
       await ctx.editMessageText(
         `📊 *Trade Preview*\n\n` +
         `${action.toUpperCase()}: ${amount} ${tokenInfo.symbol}\n` +
-        `Expected: ${ethers.formatUnits(amountOut, tokenInfo.decimals)} ${action === 'buy' ? tokenInfo.symbol : 'USDT.g'}\n` +
+        `Expected: ${ethers.formatUnits(amountOut, tokenInfo.decimals)} ${action === 'buy' ? tokenInfo.symbol : 'STT'}\n` +
         `Slippage: 1%\n` +
         `Gas: ~300,000`,
         {
@@ -180,7 +181,7 @@ async function handleAmountSelection(ctx) {
       );
     } catch (error) {
       await ctx.editMessageText(
-        '❌ Insufficient liquidity for this trade.',
+        `❌ Insufficient liquidity for this trade.\n\n${error.message || ''}`,
         Markup.inlineKeyboard(persistentButtons)
       );
     }
@@ -209,19 +210,34 @@ async function handleTradeConfirmation(ctx) {
     
     // Calculate amounts
     const amountIn = ethers.parseUnits(amount, tokenInfo.decimals);
-    const path = action === 'buy' ? ['USDT.g', tokenAddress] : [tokenAddress, 'USDT.g'];
-    const amountOut = await getAmountsOut(amountIn, path);
-    const amountOutMin = calculateAmountOutMin(amountOut, 1);
-    
-    // Execute trade
-    const result = await swapTokens(
-      amountIn,
-      amountOutMin,
-      path[0],
-      path[1],
-      wallet
-    );
-    
+    const WSTT = process.env.WETH_ADDRESS;
+    const path = action === 'buy' ? [WSTT, tokenAddress] : [tokenAddress, WSTT];
+    let amountOut, amountOutMin, result;
+    try {
+      amountOut = await getAmountsOut(amountIn, path);
+      amountOutMin = calculateAmountOutMin(amountOut, 1);
+    } catch (error) {
+      await ctx.editMessageText(
+        `❌ Trade failed: Could not estimate output.\n\n${error.message || ''}`,
+        Markup.inlineKeyboard(persistentButtons)
+      );
+      return;
+    }
+    try {
+      result = await swapTokens(
+        amountIn,
+        amountOutMin,
+        path[0],
+        path[1],
+        wallet
+      );
+    } catch (error) {
+      await ctx.editMessageText(
+        `❌ Trade failed: Swap could not be executed.\n\n${error.message || ''}`,
+        Markup.inlineKeyboard(persistentButtons)
+      );
+      return;
+    }
     if (result.success) {
       // Save trade to database
       await saveTrade({
@@ -233,17 +249,15 @@ async function handleTradeConfirmation(ctx) {
         txHash: result.txHash,
         type: action
       });
-      
       // Generate trade image
       const imagePath = await generateTradeImage({
         tokenIn: tokenInfo.symbol,
-        tokenOut: action === 'buy' ? tokenInfo.symbol : 'USDT.g',
+        tokenOut: action === 'buy' ? tokenInfo.symbol : 'STT',
         amount,
         price: ethers.formatUnits(amountOut, tokenInfo.decimals),
         txHash: result.txHash,
         type: action
       });
-      
       // Send success message with image
       await ctx.replyWithPhoto(
         { source: imagePath },
@@ -256,7 +270,6 @@ async function handleTradeConfirmation(ctx) {
           ...Markup.inlineKeyboard(persistentButtons)
         }
       );
-      
       // Delete the confirmation message
       await ctx.deleteMessage();
     } else {
@@ -356,6 +369,90 @@ async function handleFarm(ctx) {
   }
 }
 
+function setupTradeCommands(bot) {
+    // Main handler for text inputs to start a trade
+    bot.on('text', async (ctx) => {
+        // Ignore commands
+        if (ctx.message.text.startsWith('/')) return;
+
+        const text = ctx.message.text.trim();
+        const provider = new JsonRpcProvider(process.env.RPC_URL);
+
+        // Validate the token address
+        const tokenData = await getTokenMetadata(text, provider);
+        if (!tokenData.valid) {
+            await ctx.reply(tokenData.error || '❌ Invalid token address.');
+            return;
+        }
+
+        // For simplicity, we'll assume WETH (WSTT) is always one side of the pair.
+        const tokenA = process.env.WETH_ADDRESS; // WSTT
+        const tokenB = tokenData.address;
+
+        // Check for liquidity
+        const hasLiquidity = await validatePair(tokenA, tokenB);
+        if (!hasLiquidity) {
+            await ctx.reply(`❌ No liquidity found for a pair between ${tokenData.symbol} and WSTT.`);
+            return;
+        }
+
+        // Store trade context in session
+        ctx.session.trade = {
+            tokenA: tokenA, // WSTT
+            tokenB: tokenB,
+            tokenBSymbol: tokenData.symbol,
+            tokenBDecimals: tokenData.decimals,
+            action: 'buy' // Default to buy
+        };
+        
+        // Show Buy/Sell menu
+        const message = `📈 Token: *${tokenData.symbol}*\n\nSelect action:`;
+        const keyboard = Markup.inlineKeyboard([
+            [
+                Markup.button.callback('🟢 Buy', `tradeAction_buy_${tokenB}`),
+                Markup.button.callback('🔴 Sell', `tradeAction_sell_${tokenB}`)
+            ],
+            [Markup.button.callback('⬅️ Back to Main Menu', 'main_menu')]
+        ]);
+
+        await ctx.replyWithMarkdown(message, keyboard);
+    });
+
+    // Handler for "buy" or "sell" action buttons
+    bot.action(/tradeAction_(buy|sell)_(0x[a-fA-F0-9]{40})/, async (ctx) => {
+        const [, action, tokenAddress] = ctx.match;
+        const { id: userId } = ctx.from;
+        
+        // Retrieve trade context from session
+        if (!ctx.session.trade || ctx.session.trade.tokenB !== tokenAddress) {
+            // If session is lost or mismatched, prompt for token again
+            return ctx.editMessageText('Session expired. Please enter the token address again.');
+        }
+        
+        ctx.session.trade.action = action;
+
+        const message = `📈 *${action.toUpperCase()} ${ctx.session.trade.tokenBSymbol}*\n\nSelect amount to ${action} (in WSTT):`;
+        
+        const amounts = [0.1, 1, 5, 10];
+        const amountButtons = amounts.map(amount => {
+            // Correctly formatted callback data
+            const callbackData = `tradeAmount_${action}_${amount}_${tokenAddress}`;
+            return Markup.button.callback(`${amount} WSTT`, callbackData);
+        });
+
+        const keyboard = Markup.inlineKeyboard([
+            amountButtons.slice(0, 2),
+            amountButtons.slice(2, 4),
+            [Markup.button.callback('Custom Amount', `tradeAmount_${action}_custom_${tokenAddress}`)],
+            [Markup.button.callback('⬅️ Back', `trade_start_${tokenAddress}`)]
+        ]);
+
+        await ctx.editMessageText(message, { reply_markup: keyboard.reply_markup, parse_mode: 'Markdown' });
+    });
+
+    // ... any other trade-related bot listeners
+}
+
 module.exports = {
   handleTrade,
   handleTokenSelection,
@@ -363,5 +460,6 @@ module.exports = {
   handleAmountSelection,
   handleTradeConfirmation,
   handleTradeHistory,
-  handleFarm
+  handleFarm,
+  setupTradeCommands
 }; 

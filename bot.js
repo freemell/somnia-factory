@@ -1,13 +1,13 @@
 require('dotenv').config();
 const { ethers } = require('ethers');
 const { Telegraf, Markup, session } = require('telegraf');
-const { mainMenuButtons, persistentButtons } = require('./handlers/inlineButtons');
+const { mainMenuButtons, persistentButtons, referralButtons, watchlistButtons, optionsMenuButtons } = require('./handlers/inlineButtons');
 const { handleContractAddress, handleBuyAmount } = require('./handlers/inputHandler');
 const { detectContractAddress } = require('./utils/caDetector');
 const { getTokenMetadata, getSTTBalance } = require('./utils/tokenInfo');
 const { estimateTokenOutput } = require('./utils/dex');
 const { renderBuyMenu, renderInvalidTokenMessage, showMainMenu } = require('./utils/menus');
-const { getWalletForUser } = require('./utils/wallet');
+const { getWalletForUser, getUserWallet, sendTransaction, getWalletBalance } = require('./utils/walletManager');
 const {
   handleStart,
   handleCreateWallet,
@@ -44,6 +44,8 @@ const {
   handleBridgeConfirmationTestnet
 } = require('./commands/bridge');
 const { startLimitOrderMonitoring } = require('./utils/limitOrders');
+const { setupTradeCommands } = require('./commands/trade.js');
+const { addTokenToWatchlist, removeTokenFromWatchlist, getWatchlist, supabase } = require('./utils/database');
 
 // Initialize bot
 const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN);
@@ -100,10 +102,8 @@ async function handleTokenAddressInput(ctx, tokenAddress) {
       '🔍 *Loading token information...*\n\nPlease wait while I fetch the token details.',
       { parse_mode: 'Markdown' }
     );
-
     // Initialize provider
     const provider = new ethers.JsonRpcProvider(process.env.RPC_URL);
-    
     // Get token metadata
     let tokenInfo;
     try {
@@ -114,7 +114,6 @@ async function handleTokenAddressInput(ctx, tokenAddress) {
       await ctx.reply(message, { parse_mode: 'Markdown', ...buttons });
       return;
     }
-
     // Get user's wallet
     const wallet = await getWalletForUser(ctx.from.id);
     if (!wallet) {
@@ -131,18 +130,19 @@ async function handleTokenAddressInput(ctx, tokenAddress) {
       );
       return;
     }
-
     // Get STT balance
     const sttBalance = await getSTTBalance(wallet.address, provider);
     const formattedBalance = parseFloat(ethers.formatUnits(sttBalance, 18)).toFixed(3);
-
     // Estimate token output for different amounts
     const sttAmounts = [0.1, 1, 5];
-    const amountEstimates = await estimateTokenOutput(sttAmounts, tokenAddress, provider);
-
+    let amountEstimates = {};
+    try {
+      amountEstimates = await estimateTokenOutput(sttAmounts, tokenAddress, provider);
+    } catch (error) {
+      amountEstimates = { '0.1': null, '1': null, '5': null };
+    }
     // Calculate price impact (simplified)
     const priceImpact = '0.5'; // This would be calculated based on liquidity
-
     // Store in session for later use
     ctx.session = {
       ...ctx.session,
@@ -152,20 +152,13 @@ async function handleTokenAddressInput(ctx, tokenAddress) {
         estimates: amountEstimates
       }
     };
-
     // Calculate estimated output for 1 STT
-    const oneSTTEstimate = amountEstimates['1'] || ethers.parseUnits('0', tokenInfo.decimals);
-    const formattedOutput = parseFloat(ethers.formatUnits(oneSTTEstimate, tokenInfo.decimals)).toFixed(6);
-
+    const oneSTTEstimate = amountEstimates['1'];
+    const formattedOutput = oneSTTEstimate 
+      ? parseFloat(ethers.formatUnits(oneSTTEstimate, tokenInfo.decimals)).toFixed(6) 
+      : 'N/A';
     // Render token dashboard
-    const message = `🪙 *${tokenInfo.symbol}* — ${tokenInfo.name}  
-📬 Address: \`${tokenAddress}\`  
-💰 Your STT Balance: ${formattedBalance} STT  
-📈 Estimated output: ~${formattedOutput} ${tokenInfo.symbol}  
-💹 Price Impact: ~${priceImpact}%
-
-You can trade this token directly using the options below.`;
-
+    const message = `🪙 *${tokenInfo.symbol}* — ${tokenInfo.name}  \n📬 Address: \`${tokenAddress}\`  \n💰 Your STT Balance: ${formattedBalance} STT  \n📈 Estimated output: ~${formattedOutput} ${tokenInfo.symbol}  \n💹 Price Impact: ~${priceImpact}%\n\nYou can trade this token directly using the options below.`;
     const buttons = Markup.inlineKeyboard([
       [
         Markup.button.callback('⬅ Back', 'main_menu'),
@@ -193,7 +186,6 @@ You can trade this token directly using the options below.`;
         Markup.button.callback('🚀 BUY', `buy_execute_${tokenAddress}`)
       ]
     ]);
-
     // Delete loading message and show token dashboard
     await ctx.deleteMessage(loadingMsg.message_id);
     await ctx.reply(message, { parse_mode: 'Markdown', ...buttons });
@@ -209,16 +201,9 @@ You can trade this token directly using the options below.`;
 
   } catch (error) {
     console.error('Error handling token address input:', error);
-    await ctx.reply(
-      '❌ *Error Loading Token*\n\nSomething went wrong while loading the token information. Please try again.',
-      {
-        parse_mode: 'Markdown',
-        ...Markup.inlineKeyboard([
-          [Markup.button.callback('🔄 Try Again', 'main_menu')],
-          [Markup.button.callback('⬅️ Back to Menu', 'main_menu')]
-        ])
-      }
-    );
+    await ctx.reply('❌ Error loading token info. Please try again.', Markup.inlineKeyboard([
+      [Markup.button.callback('⬅️ Back', 'main_menu')]
+    ]));
   }
 }
 
@@ -231,6 +216,9 @@ bot.command('help', async (ctx) => {
     '3. Click "Buy" to start trading\n' +
     '4. Set up alerts for price changes\n' +
     '5. Manage your wallet and settings\n\n' +
+    '—\n\n' +
+    '📢 Join our [Telegram](https://t.me/+Apyc5vV4mExjNjA0)\n' +
+    '🐦 Follow us on [X](https://x.com/insomniacs_clvb)\n\n' +
     'Need more help? Contact @support',
     {
       parse_mode: 'Markdown',
@@ -245,10 +233,13 @@ bot.command('bridge', handleBridgeCommand);
 // Main menu handlers
 bot.action('main_menu', async (ctx) => {
   try {
+    console.log('🔍 [DEBUG] main_menu action triggered for user:', ctx.from.id);
     // Re-route to the start handler, which correctly checks for a wallet
+    console.log('🔍 [DEBUG] Routing to handleStart...');
     await handleStart(ctx);
+    console.log('🔍 [DEBUG] handleStart completed');
   } catch (error) {
-    console.error('Main menu error:', error);
+    console.error('🔍 [DEBUG] Main menu error:', error);
     await ctx.reply('Sorry, something went wrong. Please try again.');
   }
 });
@@ -327,67 +318,110 @@ bot.action('buy', async (ctx) => {
   );
 });
 
-// Handle fund button
+// Helper to escape MarkdownV2 special characters
+function escapeMDV2(text) {
+  return String(text).replace(/[\\_\*\[\]\(\)~`>#+\-=|{}.!]/g, '\\$&');
+}
+
+// Fund button
 bot.action('fund', async (ctx) => {
-  await ctx.editMessageText(
-    '💰 *Fund Your Wallet*\n\n' +
-    'Send SOM to this address to fund your wallet:\n\n' +
-    '`0x1234567890123456789012345678901234567890`\n\n' +
-    'Minimum deposit: 0.1 SOM\n' +
-    'Network: Somnia Testnet',
-    {
-      parse_mode: 'Markdown',
-      ...Markup.inlineKeyboard(persistentButtons)
-    }
-  );
+  const fundMsg =
+    escapeMDV2('*Official Somnia Testnet Faucet:*') + ' ' +
+    escapeMDV2('Visit the Somnia Network website at') + ' [testnet\.somnia\.network](https://testnet.somnia.network) ' +
+    escapeMDV2('and navigate to the "Get STT" or "Faucet" section. Connect your wallet (e.g., MetaMask) and request tokens.') + '\n\n' +
+    escapeMDV2('*Faucet Trade:*') + ' ' +
+    escapeMDV2('Another option is') + ' [faucet\.trade](https://faucet.trade), ' +
+    escapeMDV2('where you can claim up to 0.1 STT every 24 hours by following their steps (e.g., entering your wallet address, completing social tasks, and verifying with CAPTCHA).') + '\n\n' +
+    escapeMDV2('*Discord Community:*') + ' ' +
+    escapeMDV2('Join the Somnia Discord server, go to the #dev-chat channel, and request STT from the DevRel team (@emma_odia) or email support@somnia.network with details of your project.') + '';
+  await ctx.editMessageText(fundMsg, {
+    parse_mode: 'MarkdownV2',
+    disable_web_page_preview: true,
+    ...Markup.inlineKeyboard(persistentButtons)
+  });
 });
 
-// Handle alerts button
+// Alerts button
 bot.action('alerts', async (ctx) => {
+  await ctx.editMessageText('coming on mainnet', {
+    ...Markup.inlineKeyboard(persistentButtons)
+  });
+});
+
+// Handle options button
+bot.action('options', async (ctx) => {
   await ctx.editMessageText(
-    '🔔 *Price Alerts*\n\n' +
-    'Set up price alerts for your favorite tokens:\n\n' +
-    '1. Send a token contract address\n' +
-    '2. Choose alert type\n' +
-    '3. Set price target\n\n' +
-    'You will be notified when the price reaches your target.',
+    '*Options*\n\nChoose an option below:',
     {
       parse_mode: 'Markdown',
-      ...Markup.inlineKeyboard(persistentButtons)
+      ...Markup.inlineKeyboard(optionsMenuButtons)
     }
   );
 });
 
-// Handle help button
-bot.action('help', async (ctx) => {
-  await ctx.editMessageText(
-    '*Somnia Trading Bot Help*\n\n' +
-    '1. Send a token contract address to view token info\n' +
-    '2. Use the buttons below to navigate\n' +
-    '3. Click "Buy" to start trading\n' +
-    '4. Set up alerts for price changes\n' +
-    '5. Manage your wallet and settings\n\n' +
-    'Need more help? Contact @support',
-    {
-      parse_mode: 'Markdown',
-      ...Markup.inlineKeyboard(persistentButtons)
-    }
-  );
-});
-
-// Handle wallet button
+// Wallet button (multi-wallet support)
 bot.action('wallet', async (ctx) => {
-  await ctx.editMessageText(
-    '👛 *Your Wallet*\n\n' +
-    'Balance: 0 SOM\n' +
-    'Pending: 0 SOM\n' +
-    'Total Value: $0.00\n\n' +
-    'Click "Fund" to add SOM to your wallet.',
-    {
-      parse_mode: 'Markdown',
-      ...Markup.inlineKeyboard(persistentButtons)
-    }
-  );
+  const userId = ctx.from.id;
+  console.log('[WALLET] Fetching all wallets for user:', userId);
+  // Fetch all wallets for the user
+  const { data: wallets, error } = await supabase
+    .from('wallets')
+    .select('*')
+    .eq('user_id', userId)
+    .order('created_at', { ascending: true });
+  console.log('[WALLET] Wallets fetch result:', wallets ? wallets.length : 'null', 'error:', error);
+  if (error) {
+    return ctx.editMessageText('Error loading wallets.', { ...Markup.inlineKeyboard(persistentButtons) });
+  }
+  // Fetch active wallet from user_settings
+  console.log('[WALLET] Fetching user_settings for user:', userId);
+  const { data: settings, error: settingsError } = await supabase
+    .from('user_settings')
+    .select('current_wallet_id')
+    .eq('user_id', userId)
+    .single();
+  console.log('[WALLET] user_settings fetch result:', settings, 'error:', settingsError);
+  const activeWalletId = settings ? settings.current_wallet_id : (wallets[0] && wallets[0].id);
+  let msg = '*Your Wallets*\n\n';
+  if (!wallets.length) {
+    msg += 'No wallets found.\n';
+  } else {
+    wallets.forEach(w => {
+      msg += (w.id === activeWalletId ? '👉 ' : '') + '`' + w.address + '`' + (w.id === activeWalletId ? ' (active)' : '') + '\n';
+    });
+  }
+  msg += '\n';
+  // Wallet action buttons
+  const walletButtons = [];
+  if (wallets.length) {
+    wallets.forEach(w => {
+      walletButtons.push([Markup.button.callback((w.id === activeWalletId ? '✅ ' : '') + w.address.slice(0, 8) + '...' + w.address.slice(-6), 'switch_wallet_' + w.id)]);
+    });
+  }
+  walletButtons.push([
+    Markup.button.callback('🧬 Create New Wallet', 'create_wallet'),
+    Markup.button.callback('🔐 Import Wallet', 'import_wallet')
+  ]);
+  walletButtons.push([Markup.button.callback('🏠 Menu', 'main_menu')]);
+  console.log('[WALLET] Sending wallet menu to user:', userId);
+  await ctx.editMessageText(msg, {
+    parse_mode: 'Markdown',
+    ...Markup.inlineKeyboard(walletButtons)
+  });
+});
+
+// Switch wallet handler
+bot.action(/switch_wallet_(\d+)/, async (ctx) => {
+  const userId = ctx.from.id;
+  const walletId = parseInt(ctx.match[1], 10);
+  // Update user_settings with new active wallet
+  await supabase
+    .from('user_settings')
+    .update({ current_wallet_id: walletId })
+    .eq('user_id', userId);
+  // Refresh wallet menu
+  ctx.answerCbQuery('Switched active wallet!');
+  return bot.telegram.emit('callback_query', ctx.update.callback_query); // re-trigger wallet button
 });
 
 // Handle settings button
@@ -431,9 +465,9 @@ bot.action('refresh', async (ctx) => {
     ctx.session.sttBalance = sttBalance;
     // ctx.session.openPositions = await refreshOpenPositions(ctx.from.id); // Uncomment if you have this
 
-    // Option 2: Update message text in-place with new balances (if you track the current screen/message)
     // Example for main menu:
     if (ctx.session.currentScreen === 'main_menu') {
+      console.log('🔍 [DEBUG] Refreshing main menu for user:', ctx.from.id);
       const sttBalanceFormatted = ethers.formatEther(sttBalance);
       
       const message = `*Somnia ·* 🧠\n`+
@@ -444,19 +478,15 @@ bot.action('refresh', async (ctx) => {
                       `Join our [Telegram group](https://t.me/+Apyc5vV4mExjNjA0) and follow us on [Twitter](https://x.com/insomniacs_clvb)\n\n`+
                       `⚠️ Security tip: Don't trust links or airdrops from strangers. Always verify.`;
 
-      const mainMenuGrid = {
-        inline_keyboard: [
-          [{ text: '💸 Buy', callback_data: 'buy' }, { text: '💵 Sell', callback_data: 'sell' }],
-          [{ text: '📊 Positions', callback_data: 'positions' }, { text: '🔄 Refresh', callback_data: 'refresh' }],
-          [{ text: '⚙️ Settings', callback_data: 'settings' }, { text: '📥 Withdraw', callback_data: 'withdraw' }]
-        ]
-      };
+      console.log('🔍 [DEBUG] Using mainMenuButtons in refresh handler');
+      console.log('🔍 [DEBUG] mainMenuButtons structure:', JSON.stringify(mainMenuButtons, null, 2));
 
       await ctx.editMessageText(message, {
         parse_mode: 'Markdown',
-        reply_markup: mainMenuGrid,
+        ...Markup.inlineKeyboard(mainMenuButtons),
         disable_web_page_preview: true
       });
+      console.log('🔍 [DEBUG] Main menu refreshed successfully');
       return;
     }
     // Add similar logic for other screens if needed (token dashboard, portfolio, etc.)
@@ -502,7 +532,7 @@ async function handleBuyAmountDirect(ctx) {
     
     if (!estimatedOutput) {
       await ctx.editMessageText(
-        '❌ *Invalid Amount*\n\nPlease select a valid amount.',
+        '❌ *Invalid Amount or No Liquidity*\n\nPlease select a different amount or try another token.',
         {
           parse_mode: 'Markdown',
           ...Markup.inlineKeyboard([
@@ -961,7 +991,9 @@ async function handleTokenAmountSelection(ctx) {
 
     // Show confirmation
     const estimatedOutput = session.estimates[amount];
-    const formattedOutput = parseFloat(ethers.formatUnits(estimatedOutput, session.info.decimals)).toFixed(6);
+    const formattedOutput = estimatedOutput 
+      ? parseFloat(ethers.formatUnits(estimatedOutput, session.info.decimals)).toFixed(6) 
+      : 'N/A';
 
     await ctx.editMessageText(
       `✅ *Amount Selected*\n\n` +
@@ -1116,7 +1148,9 @@ async function handleBuyExecute(ctx) {
     }
 
     // Show final confirmation
-    const formattedOutput = parseFloat(ethers.formatUnits(estimatedOutput, session.info.decimals)).toFixed(6);
+    const formattedOutput = estimatedOutput 
+      ? parseFloat(ethers.formatUnits(estimatedOutput, session.info.decimals)).toFixed(6) 
+      : 'N/A';
 
     await ctx.editMessageText(
       `🚀 *Final Confirmation*\n\n` +
@@ -1247,6 +1281,97 @@ async function handleCustomSlippageInput(ctx) {
   }
 }
 
+// Withdraw handler
+bot.action('withdraw', async (ctx) => {
+  ctx.session = ctx.session || {};
+  ctx.session.withdrawStep = 'address';
+  await ctx.editMessageText('📤 *Withdraw/Transfer*\n\nPlease enter the wallet address you want to send tokens to:', { parse_mode: 'Markdown', ...Markup.inlineKeyboard([[Markup.button.callback('🏠 Menu', 'main_menu')]]) });
+});
+
+// Withdraw input flow
+bot.on('text', async (ctx, next) => {
+  if (ctx.session && ctx.session.withdrawStep) {
+    if (ctx.session.withdrawStep === 'address') {
+      ctx.session.withdrawTo = ctx.message.text.trim();
+      ctx.session.withdrawStep = 'amount';
+      await ctx.reply('How much STT do you want to send? (e.g., 1.5)', { ...Markup.inlineKeyboard([[Markup.button.callback('🏠 Menu', 'main_menu')]]) });
+      return;
+    } else if (ctx.session.withdrawStep === 'amount') {
+      const amount = ctx.message.text.trim();
+      const toAddress = ctx.session.withdrawTo;
+      const userWallet = await getUserWallet(ctx.from.id);
+      if (!userWallet) {
+        await ctx.reply('❌ No wallet found. Please create a wallet first.', { ...Markup.inlineKeyboard([[Markup.button.callback('🏠 Menu', 'main_menu')]]) });
+        ctx.session.withdrawStep = null;
+        return;
+      }
+      try {
+        await sendTransaction(userWallet.private_key, toAddress, amount);
+        await ctx.reply(`✅ Sent ${amount} STT to ${toAddress}`);
+      } catch (error) {
+        await ctx.reply('❌ Error sending transaction: ' + error.message);
+      }
+      ctx.session.withdrawStep = null;
+      return;
+    }
+  }
+  return next();
+});
+
+// Referral button joke
+bot.action('referral', async (ctx) => {
+  await ctx.editMessageText('👀 Referral program will be available on mainnet! Invite your friends then for maximum degen points\! 🚀', {
+    parse_mode: 'MarkdownV2',
+    ...Markup.inlineKeyboard(persistentButtons)
+  });
+});
+
+// Watchlist handler
+bot.action('watchlist', async (ctx) => {
+  const watchlist = await getWatchlist(ctx.from.id);
+  let message = '👁️ *Your Watchlist*\n\n';
+  if (watchlist.length === 0) {
+    message += 'Your watchlist is empty. Add tokens to track them here.';
+  } else {
+    message += watchlist.map((t, i) => `${i + 1}. \`${t}\``).join('\n');
+  }
+  await ctx.editMessageText(message, { parse_mode: 'Markdown', ...Markup.inlineKeyboard(watchlistButtons) });
+});
+
+// Add to watchlist flow
+bot.action('add_watchlist_token', async (ctx) => {
+  ctx.session = ctx.session || {};
+  ctx.session.addWatchlist = true;
+  await ctx.editMessageText('Send the token contract address to add to your watchlist:', { ...Markup.inlineKeyboard([[Markup.button.callback('🏠 Menu', 'main_menu')]]) });
+});
+bot.on('text', async (ctx, next) => {
+  if (ctx.session && ctx.session.addWatchlist) {
+    const tokenAddress = ctx.message.text.trim();
+    await addTokenToWatchlist(ctx.from.id, tokenAddress);
+    await ctx.reply('✅ Token added to your watchlist!', { ...Markup.inlineKeyboard([[Markup.button.callback('👁️ Watchlist', 'watchlist')]]) });
+    ctx.session.addWatchlist = false;
+    return;
+  }
+  return next();
+});
+
+// Remove from watchlist flow
+bot.action('remove_watchlist_token', async (ctx) => {
+  ctx.session = ctx.session || {};
+  ctx.session.removeWatchlist = true;
+  await ctx.editMessageText('Send the token contract address to remove from your watchlist:', { ...Markup.inlineKeyboard([[Markup.button.callback('🏠 Menu', 'main_menu')]]) });
+});
+bot.on('text', async (ctx, next) => {
+  if (ctx.session && ctx.session.removeWatchlist) {
+    const tokenAddress = ctx.message.text.trim();
+    await removeTokenFromWatchlist(ctx.from.id, tokenAddress);
+    await ctx.reply('✅ Token removed from your watchlist.', { ...Markup.inlineKeyboard([[Markup.button.callback('👁️ Watchlist', 'watchlist')]]) });
+    ctx.session.removeWatchlist = false;
+    return;
+  }
+  return next();
+});
+
 // Error handling
 bot.catch((err, ctx) => {
   console.error('Bot error:', err);
@@ -1255,6 +1380,9 @@ bot.catch((err, ctx) => {
     Markup.inlineKeyboard(persistentButtons)
   );
 });
+
+// Initialize commands
+setupTradeCommands(bot);
 
 // Start bot
 bot.launch().then(() => {
