@@ -190,6 +190,9 @@ const walletButtons = [
     Markup.button.callback('🔐 Security', 'wallet_security')
   ],
   [
+    Markup.button.callback('🗝️ Export Private Key', 'export_private_key')
+  ],
+  [
     Markup.button.callback('🔄 Refresh', 'refresh'),
     Markup.button.callback('📊 History', 'wallet_history'),
     Markup.button.callback('🏠 Menu', 'main_menu')

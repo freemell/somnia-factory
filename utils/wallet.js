@@ -112,5 +112,6 @@ async function getWalletForUser(userId) {
 module.exports = {
   createNewWallet,
   importWallet,
-  getWalletForUser
+  getWalletForUser,
+  decryptPrivateKey
 }; 

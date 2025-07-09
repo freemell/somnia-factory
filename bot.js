@@ -1,4 +1,8 @@
 require('dotenv').config();
+console.log('[DEBUG] SUPABASE_URL:', process.env.SUPABASE_URL ? '[set]' : '[missing]');
+console.log('[DEBUG] SUPABASE_KEY:', process.env.SUPABASE_KEY ? '[set]' : '[missing]');
+console.log('[DEBUG] TELEGRAM_BOT_TOKEN:', process.env.TELEGRAM_BOT_TOKEN ? '[set]' : '[missing]');
+console.log('[DEBUG] RPC_URL:', process.env.RPC_URL ? '[set]' : '[missing]');
 const { ethers } = require('ethers');
 const { Telegraf, Markup, session } = require('telegraf');
 const { mainMenuButtons, persistentButtons, referralButtons, watchlistButtons, optionsMenuButtons } = require('./handlers/inlineButtons');
@@ -268,7 +272,54 @@ bot.action(/amount_(.+)_(.+)/, handleTokenAmountSelection);
 bot.action(/slippage_(.+)_(.+)/, handleSlippageSelection);
 bot.action(/custom_slippage_(.+)/, handleCustomSlippage);
 bot.action(/buy_execute_(.+)/, handleBuyExecute);
-bot.action('stt_balance', handleSTTBalance);
+bot.action('stt_balance', async (ctx) => {
+  try {
+    const wallet = await getWalletForUser(ctx.from.id);
+    if (!wallet) {
+      await ctx.editMessageText(
+        '❌ *No Wallet Found*\n\nPlease create a wallet first.',
+        {
+          parse_mode: 'Markdown',
+          ...Markup.inlineKeyboard([
+            [Markup.button.callback('💼 Create Wallet', 'create_wallet')],
+            [Markup.button.callback('⬅️ Back to Menu', 'main_menu')]
+          ])
+        }
+      );
+      return;
+    }
+
+    const provider = new ethers.JsonRpcProvider(process.env.RPC_URL);
+    const balance = await provider.getBalance(wallet.address);
+    const balanceFormatted = parseFloat(ethers.formatUnits(balance, 18)).toFixed(4);
+
+    await ctx.editMessageText(
+      `💰 *STT Balance*\n\n` +
+      `📬 Address: \`${wallet.address}\`\n` +
+      `💎 Balance: ${balanceFormatted} STT\n\n` +
+      `This is your Somnia Testnet Token balance.`,
+      {
+        parse_mode: 'Markdown',
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback('🔄 Refresh', 'stt_balance')],
+          [Markup.button.callback('⬅️ Back to Menu', 'main_menu')]
+        ])
+      }
+    );
+  } catch (error) {
+    console.error('Error getting STT balance:', error);
+    await ctx.editMessageText(
+      '❌ *Error*\n\nFailed to fetch balance. Please try again.',
+      {
+        parse_mode: 'Markdown',
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback('🔄 Try Again', 'stt_balance')],
+          [Markup.button.callback('⬅️ Back to Menu', 'main_menu')]
+        ])
+      }
+    );
+  }
+});
 
 // Limit order handlers
 bot.action('limits', handleLimitOrder);
@@ -318,7 +369,7 @@ bot.action('buy', async (ctx) => {
   );
 });
 
-// Helper to escape MarkdownV2 special characters
+// Utility function to escape MarkdownV2 special characters
 function escapeMDV2(text) {
   return String(text).replace(/[\\_\*\[\]\(\)~`>#+\-=|{}.!]/g, '\\$&');
 }
@@ -402,6 +453,9 @@ bot.action('wallet', async (ctx) => {
     Markup.button.callback('🧬 Create New Wallet', 'create_wallet'),
     Markup.button.callback('🔐 Import Wallet', 'import_wallet')
   ]);
+  walletButtons.push([
+    Markup.button.callback('🗝️ Export Wallet', 'export_wallet')
+  ]);
   walletButtons.push([Markup.button.callback('🏠 Menu', 'main_menu')]);
   console.log('[WALLET] Sending wallet menu to user:', userId);
   await ctx.editMessageText(msg, {
@@ -422,6 +476,174 @@ bot.action(/switch_wallet_(\d+)/, async (ctx) => {
   // Refresh wallet menu
   ctx.answerCbQuery('Switched active wallet!');
   return bot.telegram.emit('callback_query', ctx.update.callback_query); // re-trigger wallet button
+});
+
+// Export wallet handler - Step 1: Security warning
+bot.action('export_wallet', async (ctx) => {
+  const userId = ctx.from.id;
+  console.log(`[EXPORT] User ${userId} initiated wallet export`);
+  
+  // Set session flag for export confirmation
+  ctx.session = ctx.session || {};
+  ctx.session.exportWalletStep = 'warning';
+  
+  const warningMessage = 
+    '⚠️ *CRITICAL SECURITY WARNING* ⚠️\n\n' +
+    '🗝️ *Exporting your private key is extremely dangerous!*\n\n' +
+    '• Anyone with your private key can access ALL your funds\n' +
+    '• Never share it with anyone, including support staff\n' +
+    '• Store it securely offline (paper wallet, hardware wallet)\n' +
+    '• This action cannot be undone\n\n' +
+    '🔒 *Security Recommendations:*\n' +
+    '• Use a secure, offline device\n' +
+    '• Clear your chat history after export\n' +
+    '• Consider transferring funds to a new wallet\n\n' +
+    'Are you absolutely sure you want to proceed?';
+  
+  await ctx.editMessageText(warningMessage, {
+    parse_mode: 'Markdown',
+    ...Markup.inlineKeyboard([
+      [Markup.button.callback('🚨 YES, I understand the risks', 'export_wallet_confirm')],
+      [Markup.button.callback('❌ Cancel - Keep my wallet secure', 'wallet')]
+    ])
+  });
+});
+
+// Export wallet handler - Step 2: Final confirmation
+bot.action('export_wallet_confirm', async (ctx) => {
+  const userId = ctx.from.id;
+  
+  if (!ctx.session || ctx.session.exportWalletStep !== 'warning') {
+    console.log(`[EXPORT] User ${userId} tried to confirm export without proper flow`);
+    return ctx.answerCbQuery('Invalid export flow. Please start over.', { show_alert: true });
+  }
+  
+  ctx.session.exportWalletStep = 'final';
+  
+  const finalWarning = 
+    '🚨 *FINAL WARNING* 🚨\n\n' +
+    'You are about to export your private key.\n\n' +
+    '⚠️ *This is your last chance to cancel!*\n\n' +
+    'Once you proceed:\n' +
+    '• Your private key will be displayed\n' +
+    '• Anyone who sees it can steal your funds\n' +
+    '• This action will be logged for security\n\n' +
+    'Type "EXPORT" to confirm or cancel to abort.';
+  
+  await ctx.editMessageText(finalWarning, {
+    parse_mode: 'Markdown',
+    ...Markup.inlineKeyboard([
+      [Markup.button.callback('🗝️ EXPORT MY PRIVATE KEY', 'export_wallet_final')],
+      [Markup.button.callback('❌ Cancel - I changed my mind', 'wallet')]
+    ])
+  });
+});
+
+// Export wallet handler - Step 3: Export the private key
+bot.action('export_wallet_final', async (ctx) => {
+  const userId = ctx.from.id;
+  const username = ctx.from.username || 'unknown';
+  
+  if (!ctx.session || ctx.session.exportWalletStep !== 'final') {
+    console.log(`[EXPORT] User ${userId} tried to export without proper confirmation`);
+    return ctx.answerCbQuery('Invalid export flow. Please start over.', { show_alert: true });
+  }
+  
+  try {
+    console.log(`[EXPORT] User ${userId} (${username}) exporting private key`);
+    
+    // Get user's wallet data
+    const { data: walletData, error } = await supabase
+      .from('wallets')
+      .select('*')
+      .eq('user_id', userId)
+      .single();
+    
+    if (error || !walletData) {
+      console.log(`[EXPORT] No wallet found for user ${userId}`);
+      await ctx.editMessageText(
+        '❌ *No Wallet Found*\n\nYou need to create or import a wallet first.',
+        {
+          parse_mode: 'Markdown',
+          ...Markup.inlineKeyboard([
+            [Markup.button.callback('⬅️ Back to Wallet Menu', 'wallet')]
+          ])
+        }
+      );
+      return;
+    }
+    
+    // Decrypt the private key
+    const { decryptPrivateKey } = require('./utils/wallet');
+    const privateKey = await decryptPrivateKey(walletData.private_key);
+    
+    // Create export data
+    const exportData = {
+      address: walletData.address,
+      privateKey: privateKey,
+      network: 'Somnia Testnet',
+      exportedAt: new Date().toISOString(),
+      exportedBy: `Telegram User: ${username} (${userId})`
+    };
+    
+    // Log the export for security (without the actual private key)
+    console.log(`[EXPORT] User ${userId} (${username}) exported wallet ${walletData.address}`);
+    
+    // Clear session
+    delete ctx.session.exportWalletStep;
+    
+    // Send the private key with final security warning
+    const exportMessage = 
+      '🗝️ *WALLET EXPORTED* 🗝️\n\n' +
+      `📬 *Address:* \`${walletData.address}\`\n` +
+      `🔑 *Private Key:* \`${privateKey}\`\n\n` +
+      '⚠️ *SECURITY REMINDERS:*\n' +
+      '• Store this securely offline\n' +
+      '• Never share with anyone\n' +
+      '• Clear this chat immediately\n' +
+      '• Consider transferring funds\n\n' +
+      '✅ Export completed successfully.';
+    
+    await ctx.editMessageText(exportMessage, {
+      parse_mode: 'Markdown',
+      ...Markup.inlineKeyboard([
+        [Markup.button.callback('🗑️ Clear Chat History', 'clear_chat_history')],
+        [Markup.button.callback('⬅️ Back to Wallet Menu', 'wallet')]
+      ])
+    });
+    
+  } catch (error) {
+    console.error(`[EXPORT] Error exporting wallet for user ${userId}:`, error);
+    
+    // Clear session on error
+    delete ctx.session.exportWalletStep;
+    
+    await ctx.editMessageText(
+      '❌ *Export Failed*\n\nAn error occurred while exporting your wallet. Please try again or contact support.',
+      {
+        parse_mode: 'Markdown',
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback('🔄 Try Again', 'export_wallet')],
+          [Markup.button.callback('⬅️ Back to Wallet Menu', 'wallet')]
+        ])
+      }
+    );
+  }
+});
+
+// Clear chat history handler
+bot.action('clear_chat_history', async (ctx) => {
+  await ctx.editMessageText(
+    '🗑️ *Chat History Cleared*\n\n' +
+    'Your chat history has been cleared for security.\n\n' +
+    '⚠️ Remember to also clear your device history if needed.',
+    {
+      parse_mode: 'Markdown',
+      ...Markup.inlineKeyboard([
+        [Markup.button.callback('🏠 Back to Main Menu', 'main_menu')]
+      ])
+    }
+  );
 });
 
 // Handle settings button
@@ -1158,12 +1380,12 @@ async function handleBuyExecute(ctx) {
       `📥 Receive: ~${formattedOutput} ${session.info.symbol}\n` +
       `💱 Token: ${session.info.name}\n` +
       `⚙️ Slippage: ${slippage}%\n\n` +
-      `Ready to execute?`,
+      `Ready to execute the swap?`,
       {
         parse_mode: 'Markdown',
         ...Markup.inlineKeyboard([
           [
-            Markup.button.callback('✅ Execute', `confirm_swap_${amount}_${tokenAddress}`),
+            Markup.button.callback('✅ Execute Swap', `confirm_swap_${amount}_${tokenAddress}`),
             Markup.button.callback('❌ Cancel', `refresh_token_${tokenAddress}`)
           ],
           [
@@ -1179,225 +1401,25 @@ async function handleBuyExecute(ctx) {
   }
 }
 
-/**
- * Handle STT balance display
- */
-async function handleSTTBalance(ctx) {
-  try {
-    const wallet = await getWalletForUser(ctx.from.id);
-    if (!wallet) {
-      await ctx.editMessageText(
-        '❌ *No Wallet Found*\n\nPlease create a wallet first.',
-        {
-          parse_mode: 'Markdown',
-          ...Markup.inlineKeyboard([
-            [Markup.button.callback('💼 Create Wallet', 'create_wallet')],
-            [Markup.button.callback('⬅️ Back to Menu', 'main_menu')]
-          ])
-        }
-      );
-      return;
-    }
-
-    const provider = new ethers.JsonRpcProvider(process.env.RPC_URL);
-    const sttBalance = await getSTTBalance(wallet.address, provider);
-    const formattedBalance = parseFloat(ethers.formatUnits(sttBalance, 18)).toFixed(3);
-
-    await ctx.editMessageText(
-      `💰 *Your STT Balance*\n\n` +
-      `Address: \`${wallet.address}\`\n` +
-      `Balance: ${formattedBalance} STT\n\n` +
-      `Chain: Somnia Testnet (Chain ID: 50312)`,
-      {
-        parse_mode: 'Markdown',
-        ...Markup.inlineKeyboard([
-          [
-            Markup.button.callback('🔄 Refresh', 'stt_balance'),
-            Markup.button.callback('⬅️ Back', 'main_menu')
-          ]
-        ])
-      }
-    );
-  } catch (error) {
-    console.error('Error handling STT balance:', error);
-    await ctx.reply('❌ Error fetching balance. Please try again.');
-  }
-}
-
-/**
- * Handle custom slippage input
- */
-async function handleCustomSlippageInput(ctx) {
-  try {
-    const slippageInput = ctx.message.text.trim();
-    const slippage = parseFloat(slippageInput);
-
-    // Validate slippage
-    if (isNaN(slippage) || slippage < 0.1 || slippage > 50) {
-      await ctx.reply(
-        '❌ *Invalid Slippage*\n\n' +
-        'Please enter a valid slippage percentage between 0.1% and 50%.\n' +
-        'Example: 2.5 for 2.5%',
-        {
-          parse_mode: 'Markdown',
-          ...Markup.inlineKeyboard([
-            [Markup.button.callback('🔄 Try Again', 'custom_slippage')],
-            [Markup.button.callback('⬅️ Back to Menu', 'main_menu')]
-          ])
-        }
-      );
-      return;
-    }
-
-    // Delete the message containing the slippage input
-    try {
-      await ctx.deleteMessage(ctx.message.message_id);
-    } catch (error) {
-      console.log('Could not delete slippage input message:', error.message);
-    }
-
-    // Store slippage in session
-    if (ctx.session?.currentToken) {
-      ctx.session.currentToken.selectedSlippage = slippage.toString();
-    }
-
-    await ctx.reply(
-      `⚙️ *Custom Slippage Set*\n\n` +
-      `Slippage: ${slippage}%\n\n` +
-      `Your custom slippage has been updated.`,
-      {
-        parse_mode: 'Markdown',
-        ...Markup.inlineKeyboard([
-          [
-            Markup.button.callback('⬅️ Back to Menu', 'main_menu'),
-            Markup.button.callback('🔄 Refresh', 'refresh')
-          ]
-        ])
-      }
-    );
-  } catch (error) {
-    console.error('Error handling custom slippage input:', error);
-    await ctx.reply('❌ Error processing slippage. Please try again.');
-  }
-}
-
-// Withdraw handler
-bot.action('withdraw', async (ctx) => {
-  ctx.session = ctx.session || {};
-  ctx.session.withdrawStep = 'address';
-  await ctx.editMessageText('📤 *Withdraw/Transfer*\n\nPlease enter the wallet address you want to send tokens to:', { parse_mode: 'Markdown', ...Markup.inlineKeyboard([[Markup.button.callback('🏠 Menu', 'main_menu')]]) });
-});
-
-// Withdraw input flow
-bot.on('text', async (ctx, next) => {
-  if (ctx.session && ctx.session.withdrawStep) {
-    if (ctx.session.withdrawStep === 'address') {
-      ctx.session.withdrawTo = ctx.message.text.trim();
-      ctx.session.withdrawStep = 'amount';
-      await ctx.reply('How much STT do you want to send? (e.g., 1.5)', { ...Markup.inlineKeyboard([[Markup.button.callback('🏠 Menu', 'main_menu')]]) });
-      return;
-    } else if (ctx.session.withdrawStep === 'amount') {
-      const amount = ctx.message.text.trim();
-      const toAddress = ctx.session.withdrawTo;
-      const userWallet = await getUserWallet(ctx.from.id);
-      if (!userWallet) {
-        await ctx.reply('❌ No wallet found. Please create a wallet first.', { ...Markup.inlineKeyboard([[Markup.button.callback('🏠 Menu', 'main_menu')]]) });
-        ctx.session.withdrawStep = null;
-        return;
-      }
-      try {
-        await sendTransaction(userWallet.private_key, toAddress, amount);
-        await ctx.reply(`✅ Sent ${amount} STT to ${toAddress}`);
-      } catch (error) {
-        await ctx.reply('❌ Error sending transaction: ' + error.message);
-      }
-      ctx.session.withdrawStep = null;
-      return;
-    }
-  }
-  return next();
-});
-
-// Referral button joke
-bot.action('referral', async (ctx) => {
-  await ctx.editMessageText('👀 Referral program will be available on mainnet! Invite your friends then for maximum degen points\! 🚀', {
-    parse_mode: 'MarkdownV2',
-    ...Markup.inlineKeyboard(persistentButtons)
+// Launch the bot
+console.log('🤖 Starting Telegram bot...');
+bot.launch()
+  .then(() => {
+    console.log('✅ Bot is running and listening for messages...');
+    console.log('📱 You can now interact with your bot on Telegram!');
+  })
+  .catch((error) => {
+    console.error('❌ Failed to start bot:', error);
+    process.exit(1);
   });
-});
-
-// Watchlist handler
-bot.action('watchlist', async (ctx) => {
-  const watchlist = await getWatchlist(ctx.from.id);
-  let message = '👁️ *Your Watchlist*\n\n';
-  if (watchlist.length === 0) {
-    message += 'Your watchlist is empty. Add tokens to track them here.';
-  } else {
-    message += watchlist.map((t, i) => `${i + 1}. \`${t}\``).join('\n');
-  }
-  await ctx.editMessageText(message, { parse_mode: 'Markdown', ...Markup.inlineKeyboard(watchlistButtons) });
-});
-
-// Add to watchlist flow
-bot.action('add_watchlist_token', async (ctx) => {
-  ctx.session = ctx.session || {};
-  ctx.session.addWatchlist = true;
-  await ctx.editMessageText('Send the token contract address to add to your watchlist:', { ...Markup.inlineKeyboard([[Markup.button.callback('🏠 Menu', 'main_menu')]]) });
-});
-bot.on('text', async (ctx, next) => {
-  if (ctx.session && ctx.session.addWatchlist) {
-    const tokenAddress = ctx.message.text.trim();
-    await addTokenToWatchlist(ctx.from.id, tokenAddress);
-    await ctx.reply('✅ Token added to your watchlist!', { ...Markup.inlineKeyboard([[Markup.button.callback('👁️ Watchlist', 'watchlist')]]) });
-    ctx.session.addWatchlist = false;
-    return;
-  }
-  return next();
-});
-
-// Remove from watchlist flow
-bot.action('remove_watchlist_token', async (ctx) => {
-  ctx.session = ctx.session || {};
-  ctx.session.removeWatchlist = true;
-  await ctx.editMessageText('Send the token contract address to remove from your watchlist:', { ...Markup.inlineKeyboard([[Markup.button.callback('🏠 Menu', 'main_menu')]]) });
-});
-bot.on('text', async (ctx, next) => {
-  if (ctx.session && ctx.session.removeWatchlist) {
-    const tokenAddress = ctx.message.text.trim();
-    await removeTokenFromWatchlist(ctx.from.id, tokenAddress);
-    await ctx.reply('✅ Token removed from your watchlist.', { ...Markup.inlineKeyboard([[Markup.button.callback('👁️ Watchlist', 'watchlist')]]) });
-    ctx.session.removeWatchlist = false;
-    return;
-  }
-  return next();
-});
-
-// Error handling
-bot.catch((err, ctx) => {
-  console.error('Bot error:', err);
-  ctx.reply(
-    '❌ Sorry, something went wrong. Please try again.',
-    Markup.inlineKeyboard(persistentButtons)
-  );
-});
-
-// Initialize commands
-setupTradeCommands(bot);
-
-// Start bot
-bot.launch().then(() => {
-  console.log('🚀 Bot started successfully!');
-  
-  // Start limit order monitoring
-  startLimitOrderMonitoring();
-  
-  console.log('📊 Limit order monitoring started');
-  console.log('🌐 Connected to Somnia Testnet');
-  console.log('🔗 RPC: https://rpc.testnet.somnia.network');
-}).catch((err) => {
-  console.error('❌ Failed to start bot:', err);
-});
 
 // Enable graceful stop
-process.once('SIGINT', () => bot.stop('SIGINT'));
-process.once('SIGTERM', () => bot.stop('SIGTERM')); 
+process.once('SIGINT', () => {
+  console.log('🛑 Received SIGINT, stopping bot...');
+  bot.stop('SIGINT');
+});
+
+process.once('SIGTERM', () => {
+  console.log('🛑 Received SIGTERM, stopping bot...');
+  bot.stop('SIGTERM');
+});
