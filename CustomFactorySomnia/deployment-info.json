@@ -1,0 +1,15 @@
+{
+  "network": "somnia-testnet",
+  "deployer": "0x35DaDAb2bb21A6d4e20beC3F603B8426Dc124004",
+  "tokens": {
+    "tokenA": "0x792C721fe2ed8004378A818a32623035b2588325",
+    "tokenB": "0xD3A6d61dCC7752b0c73F8f5D415F89E82dD80DFd"
+  },
+  "contracts": {
+    "customPoolDeployer": "0x85EFa686858F43A212F7aBF85154C10182aD1ACa",
+    "customFactory": "0x0C2bBdd5C86C874BB37120121468D2ba9726FAd7"
+  },
+  "poolCreation": {
+    "fee": 3000
+  }
+}

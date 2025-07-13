@@ -8,7 +8,74 @@ const provider = new JsonRpcProvider(process.env.RPC_URL);
 
 // Load ABI from utils/abi.json
 const abiPath = path.resolve(process.cwd(), 'utils/abi.json');
-const abi = require(abiPath);
+const abiData = require(abiPath);
+
+// Extract the Factory ABI from the JSON object
+const factoryAbi = abiData.CustomFactory || [];
+
+// Use Algebra V3 Router ABI (this is the correct ABI for Algebra V3)
+const routerAbi = [
+  {
+    "inputs": [
+      {
+        "components": [
+          {"internalType": "address", "name": "tokenIn", "type": "address"},
+          {"internalType": "address", "name": "tokenOut", "type": "address"},
+          {"internalType": "address", "name": "deployer", "type": "address"},
+          {"internalType": "address", "name": "recipient", "type": "address"},
+          {"internalType": "uint256", "name": "deadline", "type": "uint256"},
+          {"internalType": "uint256", "name": "amountIn", "type": "uint256"},
+          {"internalType": "uint256", "name": "amountOutMinimum", "type": "uint256"},
+          {"internalType": "uint160", "name": "limitSqrtPrice", "type": "uint160"}
+        ],
+        "internalType": "struct ISwapRouter.ExactInputSingleParams",
+        "name": "params",
+        "type": "tuple"
+      }
+    ],
+    "name": "exactInputSingle",
+    "outputs": [{"internalType": "uint256", "name": "amountOut", "type": "uint256"}],
+    "stateMutability": "payable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "components": [
+          {"internalType": "bytes", "name": "path", "type": "bytes"},
+          {"internalType": "address", "name": "recipient", "type": "address"},
+          {"internalType": "uint256", "name": "deadline", "type": "uint256"},
+          {"internalType": "uint256", "name": "amountIn", "type": "uint256"},
+          {"internalType": "uint256", "name": "amountOutMinimum", "type": "uint256"}
+        ],
+        "internalType": "struct ISwapRouter.ExactInputParams",
+        "name": "params",
+        "type": "tuple"
+      }
+    ],
+    "name": "exactInput",
+    "outputs": [{"internalType": "uint256", "name": "amountOut", "type": "uint256"}],
+    "stateMutability": "payable",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "WNativeToken",
+    "outputs": [{"internalType": "address", "name": "", "type": "address"}],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "factory",
+    "outputs": [{"internalType": "address", "name": "", "type": "address"}],
+    "stateMutability": "view",
+    "type": "function"
+  }
+];
+
+// Use the appropriate ABIs
+const abi = routerAbi;
 
 // --- IMPORTANT: Use correct Algebra V3 DEX addresses for Somnia testnet ---
 // SwapRouter: 0xE94de02e52Eaf9F0f6Bf7f16E4927FcBc2c09bC7
@@ -28,7 +95,7 @@ if (process.env.DEX_FACTORY_ADDRESS && process.env.DEX_FACTORY_ADDRESS.toLowerCa
 }
 
 const router = new Contract(ALGEBRA_ROUTER, abi, provider);
-const factory = new Contract(ALGEBRA_FACTORY, abi, provider);
+const factory = new Contract(ALGEBRA_FACTORY, factoryAbi, provider);
 
 /**
  * Checks if contracts are deployed
@@ -252,6 +319,35 @@ async function swapTokens(amountIn, amountOutMin, tokenIn, tokenOut, userWallet,
 }
 
 /**
+ * Generate helpful liquidity guidance message
+ */
+function getLiquidityGuidance(tokenAddress, tokenSymbol) {
+  return `💧 *No Liquidity Found*\n\n` +
+         `The ${tokenSymbol} token doesn't have enough liquidity for trading yet.\n\n` +
+         `*How to Add Liquidity:*\n\n` +
+         `1️⃣ *Visit QuickSwap Interface*\n` +
+         `   • Go to [QuickSwap Somnia Testnet](https://quickswap.exchange/#/swap?chain=somnia)\n` +
+         `   • Connect your wallet\n\n` +
+         `2️⃣ *Navigate to Pool Section*\n` +
+         `   • Click on "Pool" tab\n` +
+         `   • Select "Add Liquidity"\n\n` +
+         `3️⃣ *Select Token Pair*\n` +
+         `   • Token 1: STT (\`0x4A3BC48C156384f9564Fd65A53a2f3D534D8f2b7\`)\n` +
+         `   • Token 2: ${tokenSymbol} (\`${tokenAddress}\`)\n\n` +
+         `4️⃣ *Choose Fee Tier*\n` +
+         `   • Select 0.3% fee (3000 in Algebra V3)\n` +
+         `   • Add equal amounts of both tokens\n` +
+         `   • Example: 100 STT + 100 ${tokenSymbol}\n\n` +
+         `5️⃣ *Confirm Transaction*\n` +
+         `   • Review the transaction\n` +
+         `   • Confirm in your wallet\n\n` +
+         `*After adding liquidity:*\n` +
+         `• Check [Shannon Explorer](https://shannon-explorer.somnia.network) to verify\n` +
+         `• Return here to try trading again\n\n` +
+         `💡 *Tip:* Adding liquidity earns you trading fees!`;
+}
+
+/**
  * Estimate token output for specific STT amounts using Algebra V3
  */
 async function estimateTokenOutput(sttAmounts, tokenAddress, provider, fee = DEFAULT_FEE) {
@@ -268,6 +364,7 @@ async function estimateTokenOutput(sttAmounts, tokenAddress, provider, fee = DEF
     }
 
     const estimates = {};
+    let hasAnyLiquidity = false;
     
     for (const amount of sttAmounts) {
       try {
@@ -275,6 +372,7 @@ async function estimateTokenOutput(sttAmounts, tokenAddress, provider, fee = DEF
         const amountIn = parseUnits(amount.toString(), 18);
         const amountOut = await getAmountsOut(amountIn, [WNATIVE_ADDRESS, tokenAddress], fee);
         estimates[amount] = amountOut;
+        hasAnyLiquidity = true;
         console.log('[estimateTokenOutput] Estimate for', amount, 'STT:', amountOut.toString());
       } catch (error) {
         console.error(`Error estimating for ${amount} STT:`, error.message);
@@ -282,10 +380,19 @@ async function estimateTokenOutput(sttAmounts, tokenAddress, provider, fee = DEF
       }
     }
     
+    // If no liquidity found for any amount, add guidance
+    if (!hasAnyLiquidity) {
+      estimates._noLiquidity = true;
+      estimates._guidance = getLiquidityGuidance(tokenAddress, 'Token'); // Will be updated with actual symbol
+    }
+    
     return estimates;
   } catch (error) {
     console.error('Error estimating token output:', error);
-    return {};
+    return {
+      _error: true,
+      _guidance: getLiquidityGuidance(tokenAddress, 'Token')
+    };
   }
 }
 
@@ -345,5 +452,6 @@ module.exports = {
   estimateTokenOutput,
   calculateAmountOutMin,
   testDexRouter,
-  checkContractDeployment
+  checkContractDeployment,
+  getLiquidityGuidance
 }; 

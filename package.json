@@ -1,25 +1,36 @@
 {
   "name": "somnia-trading-bot",
   "version": "1.0.0",
-  "description": "Telegram trading bot for Somnia blockchain",
+  "description": "Telegram bot for trading on Somnia testnet",
   "main": "bot.js",
   "scripts": {
     "start": "node bot.js",
-    "dev": "nodemon bot.js"
+    "dev": "nodemon bot.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
   },
+  "keywords": [
+    "telegram",
+    "bot",
+    "trading",
+    "somnia",
+    "defi",
+    "crypto"
+  ],
+  "author": "Your Name",
+  "license": "MIT",
   "dependencies": {
-    "telegraf": "^4.15.3",
-    "ethers": "^6.11.1",
-    "dotenv": "^16.4.5",
+    "ethers": "^6.14.4",
+    "telegraf": "^4.15.6",
     "@supabase/supabase-js": "^2.39.3",
-    "jimp": "^0.22.10",
-    "axios": "^1.6.7",
-    "canvas": "^2.11.2"
+    "dotenv": "^16.4.1",
+    "express": "^4.18.2",
+    "jimp": "^0.22.10"
   },
   "devDependencies": {
     "nodemon": "^3.0.3"
   },
   "engines": {
-    "node": ">=18.0.0 <19.0.0"
+    "node": ">=18.0.0",
+    "npm": ">=8.0.0"
   }
 } 

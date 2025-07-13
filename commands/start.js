@@ -132,6 +132,15 @@ async function handleCreateWallet(ctx) {
     }
 
     console.log(`Sending welcome message`);
+    // Create custom buttons with copy address functionality
+    const customButtons = [
+      [
+        Markup.button.callback('📋 Copy Address', `copy_address_${address}`),
+        Markup.button.callback('🔄 Refresh', 'refresh')
+      ],
+      ...mainMenuButtons.slice(1) // Add the rest of the main menu buttons
+    ];
+
     // Show welcome message with wallet info and use showMainMenu for consistent layout
     await ctx.reply(
       `👋 *Welcome to SomniaBot*\n\n` +
@@ -147,7 +156,7 @@ async function handleCreateWallet(ctx) {
       `Somnia is a lightning-fast L1 testnet for Insomniac traders. Gas is subsidized for testnet trades.`,
       {
         parse_mode: 'Markdown',
-        ...Markup.inlineKeyboard(mainMenuButtons)
+        ...Markup.inlineKeyboard(customButtons)
       }
     );
     console.log(`Welcome message sent successfully`);
@@ -241,6 +250,15 @@ async function handlePrivateKeyInput(ctx) {
       formattedBalance = '0.000';
     }
 
+    // Create custom buttons with copy address functionality
+    const customButtons = [
+      [
+        Markup.button.callback('📋 Copy Address', `copy_address_${address}`),
+        Markup.button.callback('🔄 Refresh', 'refresh')
+      ],
+      ...mainMenuButtons.slice(1) // Add the rest of the main menu buttons
+    ];
+
     // Show welcome message with wallet info
     await ctx.reply(
       `👋 *Welcome to SomniaBot*\n\n` +
@@ -256,7 +274,7 @@ async function handlePrivateKeyInput(ctx) {
       `Somnia is a lightning-fast L1 testnet for Insomniac traders. Gas is subsidized for testnet trades.`,
       {
         parse_mode: 'Markdown',
-        ...Markup.inlineKeyboard(mainMenuButtons)
+        ...Markup.inlineKeyboard(customButtons)
       }
     );
 

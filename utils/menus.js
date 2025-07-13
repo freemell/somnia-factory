@@ -28,21 +28,13 @@ async function showMainMenu(ctx) {
         console.log('🔍 [DEBUG] Wallet balance:', balanceFormatted);
     } catch (rpcError) {
         console.error('🔍 [DEBUG] Could not fetch balance due to RPC error:', rpcError.shortMessage || rpcError.message);
-        balanceFormatted = 'N/A \\(RPC Down\\)';
+        balanceFormatted = 'N/A (RPC Down)';
     }
-    
-    // Helper to escape MarkdownV2 special characters
-    function escapeMDV2(text) {
-      return String(text).replace(/[\\_\*\[\]\(\)~`>#+\-=|{}.!]/g, '\\$&');
-    }
-
-    const walletAddress = escapeMDV2(wallet.address);
-    const balanceValue = escapeMDV2(balanceFormatted);
 
     const welcomeMessage =
       '🔗 *Chain:* Somnia · STT\n' +
-      '📬 *Wallet:* \\`' + walletAddress + '\\`\n\n' +
-      '💰 *Balance:* ' + balanceValue + ' STT\n\n' +
+      '📬 *Wallet:* `' + wallet.address + '`\n\n' +
+      '💰 *Balance:* ' + balanceFormatted + ' STT\n\n' +
       '—\n\n' +
       '🔄 Tap *Refresh* to update your current balance\\.\n\n' +
       '💡 You can reuse the *same wallet and settings* across all our testnet bots — optimized for Somnia speed\\.\n\n' +
@@ -53,10 +45,20 @@ async function showMainMenu(ctx) {
     console.log('🔍 [DEBUG] Using mainMenuButtons from inlineButtons.js');
     console.log('🔍 [DEBUG] mainMenuButtons structure:', JSON.stringify(mainMenuButtons, null, 2));
 
-    return ctx.replyWithMarkdownV2(
+    // Create custom buttons with copy address functionality
+    const customButtons = [
+      [
+        Markup.button.callback('📋 Copy Address', `copy_address_${wallet.address}`),
+        Markup.button.callback('🔄 Refresh', 'refresh')
+      ],
+      ...mainMenuButtons.slice(1) // Add the rest of the main menu buttons
+    ];
+
+    return ctx.reply(
       welcomeMessage,
       {
-        ...Markup.inlineKeyboard(mainMenuButtons)
+        parse_mode: 'Markdown',
+        ...Markup.inlineKeyboard(customButtons)
       }
     );
   } catch (error) {
@@ -86,10 +88,34 @@ function showWalletChoiceMenu(ctx) {
 function renderBuyMenu(tokenInfo, amountEstimates, sttBalance, tokenAddress) {
   const sttBalanceFormatted = ethers.formatUnits(sttBalance, 18);
   
+  // Check if there's no liquidity
+  if (amountEstimates._noLiquidity || amountEstimates._error) {
+    const { getLiquidityGuidance } = require('./dex');
+    const guidance = getLiquidityGuidance(tokenAddress, tokenInfo.symbol);
+    
+    const buttons = [
+      [
+        Markup.button.callback('🔄 Try Again', `refresh_token_${tokenAddress}`),
+        Markup.button.callback('🏠 Main Menu', 'main_menu')
+      ],
+      [
+        Markup.button.callback('🌐 QuickSwap', 'https://quickswap.exchange/#/swap?chain=somnia'),
+        Markup.button.callback('🔍 Explorer', 'https://shannon-explorer.somnia.network')
+      ]
+    ];
+    
+    return {
+      message: guidance,
+      buttons: Markup.inlineKeyboard(buttons)
+    };
+  }
+  
   // Format estimates
   const estimatesFormatted = {};
   for (const [amount, estimate] of Object.entries(amountEstimates)) {
-    estimatesFormatted[amount] = ethers.formatUnits(estimate, tokenInfo.decimals);
+    if (estimate) {
+      estimatesFormatted[amount] = ethers.formatUnits(estimate, tokenInfo.decimals);
+    }
   }
   
   // Calculate 1 STT ≈ X TOKEN

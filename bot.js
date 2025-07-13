@@ -5,13 +5,14 @@ console.log('[DEBUG] TELEGRAM_BOT_TOKEN:', process.env.TELEGRAM_BOT_TOKEN ? '[se
 console.log('[DEBUG] RPC_URL:', process.env.RPC_URL ? '[set]' : '[missing]');
 const { ethers } = require('ethers');
 const { Telegraf, Markup, session } = require('telegraf');
+const express = require('express');
 const { mainMenuButtons, persistentButtons, referralButtons, watchlistButtons, optionsMenuButtons } = require('./handlers/inlineButtons');
 const { handleContractAddress, handleBuyAmount } = require('./handlers/inputHandler');
 const { detectContractAddress } = require('./utils/caDetector');
 const { getTokenMetadata, getSTTBalance } = require('./utils/tokenInfo');
 const { estimateTokenOutput } = require('./utils/dex');
 const { renderBuyMenu, renderInvalidTokenMessage, showMainMenu } = require('./utils/menus');
-const { getWalletForUser, getUserWallet, sendTransaction, getWalletBalance } = require('./utils/walletManager');
+const { getUserWallet, sendTransaction, getWalletBalance } = require('./utils/walletManager');
 const {
   handleStart,
   handleCreateWallet,
@@ -119,7 +120,7 @@ async function handleTokenAddressInput(ctx, tokenAddress) {
       return;
     }
     // Get user's wallet
-    const wallet = await getWalletForUser(ctx.from.id);
+    const wallet = await getUserWallet(ctx.from.id);
     if (!wallet) {
       await ctx.deleteMessage(loadingMsg.message_id);
       await ctx.reply(
@@ -144,6 +145,41 @@ async function handleTokenAddressInput(ctx, tokenAddress) {
       amountEstimates = await estimateTokenOutput(sttAmounts, tokenAddress, provider);
     } catch (error) {
       amountEstimates = { '0.1': null, '1': null, '5': null };
+    }
+    
+    // Check if no liquidity was found
+    if (amountEstimates._noLiquidity || amountEstimates._error) {
+      await ctx.deleteMessage(loadingMsg.message_id);
+      
+      // Get the guidance message with the actual token symbol
+      const { getLiquidityGuidance } = require('./utils/dex');
+      const guidance = getLiquidityGuidance(tokenAddress, tokenInfo.symbol);
+      
+      await ctx.reply(guidance, {
+        parse_mode: 'Markdown',
+        ...Markup.inlineKeyboard([
+          [
+            Markup.button.callback('🔄 Try Again', `refresh_token_${tokenAddress}`),
+            Markup.button.callback('🏠 Main Menu', 'main_menu')
+          ],
+          [
+            Markup.button.callback('🌐 QuickSwap', 'https://quickswap.exchange/#/swap?chain=somnia'),
+            Markup.button.callback('🔍 Explorer', 'https://shannon-explorer.somnia.network')
+          ]
+        ]),
+        disable_web_page_preview: true
+      });
+      
+      // Auto-delete the original address message after 10 seconds
+      setTimeout(async () => {
+        try {
+          await ctx.deleteMessage(ctx.message.message_id);
+        } catch (error) {
+          console.log('Could not delete original message:', error.message);
+        }
+      }, 10000);
+      
+      return;
     }
     // Calculate price impact (simplified)
     const priceImpact = '0.5'; // This would be calculated based on liquidity
@@ -274,7 +310,7 @@ bot.action(/custom_slippage_(.+)/, handleCustomSlippage);
 bot.action(/buy_execute_(.+)/, handleBuyExecute);
 bot.action('stt_balance', async (ctx) => {
   try {
-    const wallet = await getWalletForUser(ctx.from.id);
+    const wallet = await getUserWallet(ctx.from.id);
     if (!wallet) {
       await ctx.editMessageText(
         '❌ *No Wallet Found*\n\nPlease create a wallet first.',
@@ -301,7 +337,10 @@ bot.action('stt_balance', async (ctx) => {
       {
         parse_mode: 'Markdown',
         ...Markup.inlineKeyboard([
-          [Markup.button.callback('🔄 Refresh', 'stt_balance')],
+          [
+            Markup.button.callback('📋 Copy Address', `copy_address_${wallet.address}`),
+            Markup.button.callback('🔄 Refresh', 'stt_balance')
+          ],
           [Markup.button.callback('⬅️ Back to Menu', 'main_menu')]
         ])
       }
@@ -446,7 +485,10 @@ bot.action('wallet', async (ctx) => {
   const walletButtons = [];
   if (wallets.length) {
     wallets.forEach(w => {
-      walletButtons.push([Markup.button.callback((w.id === activeWalletId ? '✅ ' : '') + w.address.slice(0, 8) + '...' + w.address.slice(-6), 'switch_wallet_' + w.id)]);
+      walletButtons.push([
+        Markup.button.callback((w.id === activeWalletId ? '✅ ' : '') + w.address.slice(0, 8) + '...' + w.address.slice(-6), 'switch_wallet_' + w.id),
+        Markup.button.callback('📋 Copy', 'copy_address_' + w.address)
+      ]);
     });
   }
   walletButtons.push([
@@ -662,11 +704,39 @@ bot.action('settings', async (ctx) => {
   );
 });
 
+// Handle copy address button
+bot.action(/copy_address_(.+)/, async (ctx) => {
+  try {
+    const walletAddress = ctx.match[1];
+    
+    // Copy the address to clipboard (Telegram will show a copy notification)
+    await ctx.answerCbQuery(`Address copied: ${walletAddress}`, { show_alert: true });
+    
+    // Also send the address as a separate message for easy copying
+    await ctx.reply(
+      `📋 *Wallet Address*\n\n` +
+      `\`${walletAddress}\`\n\n` +
+      `✅ Address copied to clipboard!\n\n` +
+      `💡 You can now paste this address anywhere you need it.`,
+      {
+        parse_mode: 'Markdown',
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback('⬅️ Back to Menu', 'main_menu')]
+        ])
+      }
+    );
+    
+  } catch (error) {
+    console.error('Error copying address:', error);
+    await ctx.answerCbQuery('Failed to copy address. Please try again.', { show_alert: true });
+  }
+});
+
 // Handle refresh button
 bot.action('refresh', async (ctx) => {
   try {
     // Get user's wallet
-    const wallet = await getWalletForUser(ctx.from.id);
+    const wallet = await getUserWallet(ctx.from.id);
     if (!wallet) {
       // If no wallet, do nothing (or optionally show a warning)
       return;
@@ -693,7 +763,7 @@ bot.action('refresh', async (ctx) => {
       const sttBalanceFormatted = ethers.formatEther(sttBalance);
       
       const message = `*Somnia ·* 🧠\n`+
-                      `\`${wallet.address}\` (Tap to copy)\n` +
+                      `\`${wallet.address}\`\n` +
                       `Balance: ${parseFloat(sttBalanceFormatted).toFixed(4)} STT\n\n` +
                       `—\n\n`+
                       `Somnia is a lightning-fast L2 testnet for Insomniac traders. Gasless. Composable. Built for speed.\n\n`+
@@ -703,9 +773,18 @@ bot.action('refresh', async (ctx) => {
       console.log('🔍 [DEBUG] Using mainMenuButtons in refresh handler');
       console.log('🔍 [DEBUG] mainMenuButtons structure:', JSON.stringify(mainMenuButtons, null, 2));
 
+      // Create custom buttons with copy address functionality for refresh
+      const customButtons = [
+        [
+          Markup.button.callback('📋 Copy Address', `copy_address_${wallet.address}`),
+          Markup.button.callback('🔄 Refresh', 'refresh')
+        ],
+        ...mainMenuButtons.slice(1) // Add the rest of the main menu buttons
+      ];
+
       await ctx.editMessageText(message, {
         parse_mode: 'Markdown',
-        ...Markup.inlineKeyboard(mainMenuButtons),
+        ...Markup.inlineKeyboard(customButtons),
         disable_web_page_preview: true
       });
       console.log('🔍 [DEBUG] Main menu refreshed successfully');
@@ -808,11 +887,34 @@ async function handleRefreshToken(ctx) {
     const provider = new ethers.JsonRpcProvider(process.env.RPC_URL);
     const tokenInfo = await getTokenMetadata(tokenAddress, provider);
     
-    const wallet = await getWalletForUser(ctx.from.id);
+    const wallet = await getUserWallet(ctx.from.id);
     const sttBalance = await getSTTBalance(wallet.address, provider);
     
     const sttAmounts = [0.1, 1, 5];
     const amountEstimates = await estimateTokenOutput(sttAmounts, tokenAddress, provider);
+
+    // Check if no liquidity was found
+    if (amountEstimates._noLiquidity || amountEstimates._error) {
+      // Get the guidance message with the actual token symbol
+      const { getLiquidityGuidance } = require('./utils/dex');
+      const guidance = getLiquidityGuidance(tokenAddress, tokenInfo.symbol);
+      
+      await ctx.editMessageText(guidance, {
+        parse_mode: 'Markdown',
+        ...Markup.inlineKeyboard([
+          [
+            Markup.button.callback('🔄 Try Again', `refresh_token_${tokenAddress}`),
+            Markup.button.callback('🏠 Main Menu', 'main_menu')
+          ],
+          [
+            Markup.button.callback('🌐 QuickSwap', 'https://quickswap.exchange/#/swap?chain=somnia'),
+            Markup.button.callback('🔍 Explorer', 'https://shannon-explorer.somnia.network')
+          ]
+        ]),
+        disable_web_page_preview: true
+      });
+      return;
+    }
 
     // Update session
     ctx.session = {
@@ -906,7 +1008,7 @@ async function handleConfirmSwap(ctx) {
     }
 
     // Get wallet
-    const wallet = await getWalletForUser(ctx.from.id);
+    const wallet = await getUserWallet(ctx.from.id);
     if (!wallet) {
       await ctx.editMessageText(
         '❌ *No Wallet Found*\n\nPlease create a wallet first.',
@@ -1400,6 +1502,34 @@ async function handleBuyExecute(ctx) {
     await ctx.reply('❌ Error processing request. Please try again.');
   }
 }
+
+// Setup Express server for Railway health checks
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+// Health check endpoint for Railway
+app.get('/health', (req, res) => {
+  res.status(200).json({
+    status: 'healthy',
+    timestamp: new Date().toISOString(),
+    service: 'Somnia Trading Bot',
+    version: '1.0.0'
+  });
+});
+
+// Root endpoint
+app.get('/', (req, res) => {
+  res.json({
+    message: 'Somnia Trading Bot is running!',
+    status: 'active',
+    timestamp: new Date().toISOString()
+  });
+});
+
+// Start Express server
+app.listen(PORT, () => {
+  console.log(`🌐 Express server running on port ${PORT}`);
+});
 
 // Launch the bot
 console.log('🤖 Starting Telegram bot...');

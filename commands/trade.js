@@ -180,10 +180,39 @@ async function handleAmountSelection(ctx) {
         }
       );
     } catch (error) {
-      await ctx.editMessageText(
-        `❌ Insufficient liquidity for this trade.\n\n${error.message || ''}`,
-        Markup.inlineKeyboard(persistentButtons)
-      );
+      // Check if it's a liquidity error
+      if (error.message && error.message.includes('No liquidity pool exists')) {
+        const { getLiquidityGuidance } = require('../utils/dex');
+        const { getTokenMetadata } = require('../utils/tokenInfo');
+        
+        // Get token info for the guidance message
+        const provider = new ethers.JsonRpcProvider(process.env.RPC_URL);
+        const tokenInfo = await getTokenMetadata(tokenAddress, provider);
+        const guidance = getLiquidityGuidance(tokenAddress, tokenInfo.symbol);
+        
+        await ctx.editMessageText(
+          guidance,
+          {
+            parse_mode: 'Markdown',
+            ...Markup.inlineKeyboard([
+              [
+                Markup.button.callback('🔄 Try Again', `refresh_token_${tokenAddress}`),
+                Markup.button.callback('🏠 Main Menu', 'main_menu')
+              ],
+              [
+                Markup.button.callback('🌐 QuickSwap', 'https://quickswap.exchange/#/swap?chain=somnia'),
+                Markup.button.callback('🔍 Explorer', 'https://shannon-explorer.somnia.network')
+              ]
+            ]),
+            disable_web_page_preview: true
+          }
+        );
+      } else {
+        await ctx.editMessageText(
+          `❌ Insufficient liquidity for this trade.\n\n${error.message || ''}`,
+          Markup.inlineKeyboard(persistentButtons)
+        );
+      }
     }
   } catch (error) {
     console.error('Amount selection error:', error);
@@ -217,10 +246,34 @@ async function handleTradeConfirmation(ctx) {
       amountOut = await getAmountsOut(amountIn, path);
       amountOutMin = calculateAmountOutMin(amountOut, 1);
     } catch (error) {
-      await ctx.editMessageText(
-        `❌ Trade failed: Could not estimate output.\n\n${error.message || ''}`,
-        Markup.inlineKeyboard(persistentButtons)
-      );
+      // Check if it's a liquidity error
+      if (error.message && error.message.includes('No liquidity pool exists')) {
+        const { getLiquidityGuidance } = require('../utils/dex');
+        const guidance = getLiquidityGuidance(tokenAddress, tokenInfo.symbol);
+        
+        await ctx.editMessageText(
+          guidance,
+          {
+            parse_mode: 'Markdown',
+            ...Markup.inlineKeyboard([
+              [
+                Markup.button.callback('🔄 Try Again', `refresh_token_${tokenAddress}`),
+                Markup.button.callback('🏠 Main Menu', 'main_menu')
+              ],
+              [
+                Markup.button.callback('🌐 QuickSwap', 'https://quickswap.exchange/#/swap?chain=somnia'),
+                Markup.button.callback('🔍 Explorer', 'https://shannon-explorer.somnia.network')
+              ]
+            ]),
+            disable_web_page_preview: true
+          }
+        );
+      } else {
+        await ctx.editMessageText(
+          `❌ Trade failed: Could not estimate output.\n\n${error.message || ''}`,
+          Markup.inlineKeyboard(persistentButtons)
+        );
+      }
       return;
     }
     try {
@@ -392,7 +445,23 @@ function setupTradeCommands(bot) {
         // Check for liquidity
         const hasLiquidity = await validatePair(tokenA, tokenB);
         if (!hasLiquidity) {
-            await ctx.reply(`❌ No liquidity found for a pair between ${tokenData.symbol} and WSTT.`);
+            const { getLiquidityGuidance } = require('../utils/dex');
+            const guidance = getLiquidityGuidance(tokenData.address, tokenData.symbol);
+            
+            await ctx.reply(guidance, {
+                parse_mode: 'Markdown',
+                ...Markup.inlineKeyboard([
+                    [
+                        Markup.button.callback('🔄 Try Again', `refresh_token_${tokenData.address}`),
+                        Markup.button.callback('🏠 Main Menu', 'main_menu')
+                    ],
+                    [
+                        Markup.button.callback('🌐 QuickSwap', 'https://quickswap.exchange/#/swap?chain=somnia'),
+                        Markup.button.callback('🔍 Explorer', 'https://shannon-explorer.somnia.network')
+                    ]
+                ]),
+                disable_web_page_preview: true
+            });
             return;
         }
 
