@@ -114,7 +114,7 @@ function renderBuyMenu(tokenInfo, amountEstimates, sttBalance, tokenAddress) {
   const estimatesFormatted = {};
   for (const [amount, estimate] of Object.entries(amountEstimates)) {
     if (estimate) {
-      estimatesFormatted[amount] = ethers.formatUnits(estimate, tokenInfo.decimals);
+    estimatesFormatted[amount] = ethers.formatUnits(estimate, tokenInfo.decimals);
     }
   }
   

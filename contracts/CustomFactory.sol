@@ -2,11 +2,11 @@
 pragma solidity =0.8.20;
 
 import "@openzeppelin/contracts/access/Ownable.sol";
-import "@uniswap/v3-core/contracts/libraries/PoolAddress.sol";
+import "./CustomPool.sol";
 
 contract CustomFactory is Ownable {
     address public feeToSetter;
-    mapping(address => mapping(address => mapping(uint24 => address))) public getPool;
+    mapping(address => mapping(address => mapping(uint24 => address))) public pools;
     uint256 public poolCount;
 
     event PoolCreated(address indexed token0, address indexed token1, uint24 fee, int24 tickSpacing, address pool);
@@ -20,14 +20,17 @@ contract CustomFactory is Ownable {
         require(tokenA != tokenB, "IDENTICAL_ADDRESSES");
         (address token0, address token1) = tokenA < tokenB ? (tokenA, tokenB) : (tokenB, tokenA);
         require(token0 != address(0) && token1 != address(0), "ZERO_ADDRESS");
-        require(getPool[token0][token1][fee] == address(0), "POOL_EXISTS");
+        require(pools[token0][token1][fee] == address(0), "POOL_EXISTS");
         require(fee == 100 || fee == 500 || fee == 3000 || fee == 10000, "INVALID_FEE");
 
-        bytes32 salt = keccak256(abi.encodePacked(token0, token1, fee));
-        pool = PoolAddress.computeAddress(address(this), PoolAddress.PoolKey({token0: token0, token1: token1, fee: fee, tickSpacing: tickSpacing}));
+        // Create a new CustomPool using CREATE2 for deterministic addresses
+        bytes32 salt = keccak256(abi.encodePacked(token0, token1, fee, tickSpacing));
+        
+        // Deploy the pool using CREATE2
+        pool = address(new CustomPool{salt: salt}(token0, token1, fee, tickSpacing));
 
-        getPool[token0][token1][fee] = pool;
-        getPool[token1][token0][fee] = pool;
+        pools[token0][token1][fee] = pool;
+        pools[token1][token0][fee] = pool;
         poolCount += 1;
         emit PoolCreated(token0, token1, fee, tickSpacing, pool);
         return pool;
@@ -35,7 +38,7 @@ contract CustomFactory is Ownable {
 
     function getPool(address tokenA, address tokenB, uint24 fee) external view returns (address) {
         (address token0, address token1) = tokenA < tokenB ? (tokenA, tokenB) : (tokenB, tokenA);
-        return getPool[token0][token1][fee];
+        return pools[token0][token1][fee];
     }
 
     function setFeeToSetter(address _feeToSetter) external onlyOwner {

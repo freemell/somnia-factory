@@ -208,10 +208,10 @@ async function handleAmountSelection(ctx) {
           }
         );
       } else {
-        await ctx.editMessageText(
-          `❌ Insufficient liquidity for this trade.\n\n${error.message || ''}`,
-          Markup.inlineKeyboard(persistentButtons)
-        );
+      await ctx.editMessageText(
+        `❌ Insufficient liquidity for this trade.\n\n${error.message || ''}`,
+        Markup.inlineKeyboard(persistentButtons)
+      );
       }
     }
   } catch (error) {
@@ -269,10 +269,10 @@ async function handleTradeConfirmation(ctx) {
           }
         );
       } else {
-        await ctx.editMessageText(
-          `❌ Trade failed: Could not estimate output.\n\n${error.message || ''}`,
-          Markup.inlineKeyboard(persistentButtons)
-        );
+      await ctx.editMessageText(
+        `❌ Trade failed: Could not estimate output.\n\n${error.message || ''}`,
+        Markup.inlineKeyboard(persistentButtons)
+      );
       }
       return;
     }

@@ -6,7 +6,10 @@
   "scripts": {
     "start": "node bot.js",
     "dev": "nodemon bot.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "compile": "hardhat compile",
+    "deploy:insomiacs": "hardhat run scripts/deploy-insomiacs.js --network somniaTestnet",
+    "test:insomiacs": "hardhat test test/CustomFactory.js --network somniaTestnet"
   },
   "keywords": [
     "telegram",
@@ -19,18 +22,27 @@
   "author": "Your Name",
   "license": "MIT",
   "dependencies": {
-    "ethers": "^6.14.4",
-    "telegraf": "^4.15.6",
     "@supabase/supabase-js": "^2.39.3",
+    "@uniswap/v3-core": "^1.0.1",
     "dotenv": "^16.4.1",
+    "ethers": "^6.14.4",
     "express": "^4.18.2",
-    "jimp": "^0.22.10"
+    "jimp": "^0.22.10",
+    "telegraf": "^4.15.6"
   },
   "devDependencies": {
+    "@cryptoalgebra/integral-core": "^1.2.8",
+    "@nomicfoundation/hardhat-chai-matchers": "^2.0.9",
+    "@nomicfoundation/hardhat-ethers": "^3.0.9",
+    "@nomicfoundation/hardhat-verify": "^2.0.14",
+    "@openzeppelin/contracts": "^5.3.0",
+    "chai": "^4.5.0",
+    "hardhat": "^2.25.0",
+    "mocha": "^11.7.1",
     "nodemon": "^3.0.3"
   },
   "engines": {
     "node": ">=18.0.0",
     "npm": ">=8.0.0"
   }
-} 
+}

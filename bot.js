@@ -1541,7 +1541,7 @@ bot.launch()
   .catch((error) => {
     console.error('❌ Failed to start bot:', error);
     process.exit(1);
-  });
+});
 
 // Enable graceful stop
 process.once('SIGINT', () => {
