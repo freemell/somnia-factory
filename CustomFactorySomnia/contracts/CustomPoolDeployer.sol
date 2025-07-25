@@ -3,7 +3,7 @@ pragma solidity =0.8.20;
 
 import "@openzeppelin/contracts/access/Ownable.sol";
 
-interface ITestPool {
+interface ICustomPool {
     function initialize(address _token0, address _token1, uint24 _fee, address _factory) external;
 }
 
@@ -57,7 +57,7 @@ contract CustomPoolDeployer is Ownable {
         require(pool != address(0), "Pool deployment failed");
         
         // Initialize the pool
-        try ITestPool(pool).initialize(token0, token1, fee, factory) {
+        try ICustomPool(pool).initialize(token0, token1, fee, factory) {
             // Success
         } catch Error(string memory reason) {
             revert(string(abi.encodePacked("Pool initialization failed: ", reason)));

@@ -2,14 +2,19 @@
   "network": "somnia-testnet",
   "deployer": "0x35DaDAb2bb21A6d4e20beC3F603B8426Dc124004",
   "tokens": {
-    "tokenA": "0x792C721fe2ed8004378A818a32623035b2588325",
-    "tokenB": "0xD3A6d61dCC7752b0c73F8f5D415F89E82dD80DFd"
+    "tokenA": "0x94E2ae13081636bd62E596E08bE6342d3F585aD2",
+    "tokenB": "0xA3ea70ADb7818e13ba55064158252D2e0f9a918c"
   },
   "contracts": {
-    "customPoolDeployer": "0x85EFa686858F43A212F7aBF85154C10182aD1ACa",
-    "customFactory": "0x0C2bBdd5C86C874BB37120121468D2ba9726FAd7"
+    "customPoolDeployer": "0x954543565985E48dF582Ac452c4CbffB028961dB",
+    "customFactory": "0x1ABF676f2D149b742E6A482Eaaa7bDC81b4148c6"
   },
   "poolCreation": {
-    "fee": 3000
-  }
+    "fee": 3000,
+    "poolAddress": "0x05942239059D344BD5c25b597Abf89F00A91537e",
+    "owner": "0x954543565985E48dF582Ac452c4CbffB028961dB",
+    "tickSpacing": 60
+  },
+  "deploymentDate": "2025-01-27T15:30:00.000Z",
+  "transactionHash": "0x05804a9308d999f830d88b33cb4e42c33ee214306914a33c9de1ba5d2117a59a"
 }
