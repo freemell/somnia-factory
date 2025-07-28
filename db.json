@@ -1,0 +1,54 @@
+{
+  "balances": {
+    "6667190190": 95
+  },
+  "positions": {
+    "6667190190": [
+      {
+        "address": "0x0C726E446865FFb19Cc13f21aBf0F515106C9662",
+        "symbol": "INSOM",
+        "name": "Insomiacs",
+        "amount": "100000000000000000000",
+        "decimals": "18"
+      },
+      {
+        "address": "0x0C726E446865FFb19Cc13f21aBf0F515106C9662",
+        "symbol": "INSOM",
+        "name": "Insomiacs",
+        "amount": "100000000000000000000",
+        "decimals": "18"
+      },
+      {
+        "address": "0x0C726E446865FFb19Cc13f21aBf0F515106C9662",
+        "symbol": "INSOM",
+        "name": "Insomiacs",
+        "amount": "100000000000000000000",
+        "decimals": "18"
+      },
+      {
+        "address": "0x0C726E446865FFb19Cc13f21aBf0F515106C9662",
+        "symbol": "INSOM",
+        "name": "Insomiacs",
+        "amount": "100000000000000000000",
+        "decimals": "18"
+      },
+      {
+        "address": "0x0C726E446865FFb19Cc13f21aBf0F515106C9662",
+        "symbol": "INSOM",
+        "name": "Insomiacs",
+        "amount": "100000000000000000000",
+        "decimals": "18"
+      }
+    ]
+  },
+  "6667190190": {
+    "balance": {
+      "stt": -6,
+      "insom": 0
+    },
+    "positions": {
+      "insom": 10,
+      "ping": 0.5
+    }
+  }
+}

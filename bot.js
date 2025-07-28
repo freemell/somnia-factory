@@ -4,8 +4,11 @@ console.log('[DEBUG] SUPABASE_KEY:', process.env.SUPABASE_KEY ? '[set]' : '[miss
 console.log('[DEBUG] TELEGRAM_BOT_TOKEN:', process.env.TELEGRAM_BOT_TOKEN ? '[set]' : '[missing]');
 console.log('[DEBUG] RPC_URL:', process.env.RPC_URL ? '[set]' : '[missing]');
 const { ethers } = require('ethers');
-const { Telegraf, Markup, session } = require('telegraf');
+const { Telegraf, Markup } = require('telegraf');
+const LocalSession = require('telegraf-session-local');
 const express = require('express');
+const CustomSwap = require('./utils/customSwap');
+const TestnetSwap = require('./utils/testnetSwap');
 const { mainMenuButtons, persistentButtons, referralButtons, watchlistButtons, optionsMenuButtons } = require('./handlers/inlineButtons');
 const { handleContractAddress, handleBuyAmount } = require('./handlers/inputHandler');
 const { detectContractAddress } = require('./utils/caDetector');
@@ -51,12 +54,40 @@ const {
 const { startLimitOrderMonitoring } = require('./utils/limitOrders');
 const { setupTradeCommands } = require('./commands/trade.js');
 const { addTokenToWatchlist, removeTokenFromWatchlist, getWatchlist, supabase } = require('./utils/database');
+const { initUser, getUserData, setUserBalance, updateUserPosition, loadDB, saveDB } = require('./utils/database');
+
+// Contract addresses for custom swap
+const CUSTOM_CONTRACTS = {
+  customFactory: '0x1ABF676f2D149b742E6A482Eaaa7bDC81b4148c6',
+  customPoolDeployer: '0x954543565985E48dF582Ac452c4CbffB028961dB',
+  poolAddress: '0x05942239059D344BD5c25b597Abf89F00A91537e',
+  tokenA: '0x94E2ae13081636bd62E596E08bE6342d3F585aD2',
+  tokenB: '0xA3ea70ADb7818e13ba55064158252D2e0f9a918c',
+  deployer: '0x35DaDAb2bb21A6d4e20beC3F603b8426Dc124004'
+};
+
+// Testnet token addresses
+const TESTNET_TOKENS = {
+  stt: '0x4A3BC48C156384f9564Fd65A53a2f3D534D8f2b7',
+  ping: '0x33E7fAB0a8a5da1A923180989bD617c9c2D1C493',
+  insomiacs: '0x0C726E446865FFb19Cc13f21aBf0F515106C9662'
+};
 
 // Initialize bot
 const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN);
 
-// Use session middleware
-bot.use(session());
+// Use persistent session middleware (sessions.json) with BigInt-safe serializer
+bot.use(new LocalSession({
+  database: 'sessions.json',
+  format: {
+    serialize: obj => JSON.stringify(obj, (k, v) => typeof v === 'bigint' ? v.toString() : v),
+    deserialize: JSON.parse
+  }
+}).middleware());
+
+// Register these handlers FIRST so they are not shadowed
+bot.action(/sell_percent_(\d+)_(0x[a-fA-F0-9]{40})/, handleSellPercentDirect);
+bot.action(/buy_amount_(.+)_(.+)/, handleBuyAmountDirect);
 
 // Start command
 bot.command('start', handleStart);
@@ -90,11 +121,24 @@ bot.on('text', async (ctx) => {
     return;
   }
 
-  // Handle contract address input (legacy)
-  const address = detectContractAddress(ctx.message.text);
-  if (address) {
+  // Check if this is a contract address input
+  if (ctx.session && ctx.session.waitingForContractAddress) {
     await handleContractAddress(ctx);
+    return;
   }
+
+  // Check if this is a buy amount input
+  if (ctx.session && ctx.session.waitingForBuyAmount) {
+    await handleBuyAmount(ctx);
+    return;
+  }
+
+  // Default response for unrecognized text
+  await ctx.reply(
+    '🤖 *Somnia Trading Bot*\n\n' +
+    'Please use the menu buttons or send a valid token address to get started.',
+    { parse_mode: 'Markdown', ...mainMenuButtons }
+  );
 });
 
 /**
@@ -102,27 +146,22 @@ bot.on('text', async (ctx) => {
  */
 async function handleTokenAddressInput(ctx, tokenAddress) {
   try {
-    // Show loading message
-    const loadingMsg = await ctx.reply(
-      '🔍 *Loading token information...*\n\nPlease wait while I fetch the token details.',
-      { parse_mode: 'Markdown' }
-    );
     // Initialize provider
     const provider = new ethers.JsonRpcProvider(process.env.RPC_URL);
+    
     // Get token metadata
     let tokenInfo;
     try {
       tokenInfo = await getTokenMetadata(tokenAddress, provider);
     } catch (error) {
-      await ctx.deleteMessage(loadingMsg.message_id);
       const { message, buttons } = renderInvalidTokenMessage();
       await ctx.reply(message, { parse_mode: 'Markdown', ...buttons });
       return;
     }
+
     // Get user's wallet
     const wallet = await getUserWallet(ctx.from.id);
     if (!wallet) {
-      await ctx.deleteMessage(loadingMsg.message_id);
       await ctx.reply(
         '❌ *No Wallet Found*\n\nPlease create a wallet first to start trading.',
         {
@@ -135,70 +174,217 @@ async function handleTokenAddressInput(ctx, tokenAddress) {
       );
       return;
     }
+
     // Get STT balance
     const sttBalance = await getSTTBalance(wallet.address, provider);
     const formattedBalance = parseFloat(ethers.formatUnits(sttBalance, 18)).toFixed(3);
-    // Estimate token output for different amounts
-    const sttAmounts = [0.1, 1, 5];
-    let amountEstimates = {};
-    try {
-      amountEstimates = await estimateTokenOutput(sttAmounts, tokenAddress, provider);
-    } catch (error) {
-      amountEstimates = { '0.1': null, '1': null, '5': null };
-    }
-    
-    // Check if no liquidity was found
-    if (amountEstimates._noLiquidity || amountEstimates._error) {
-      await ctx.deleteMessage(loadingMsg.message_id);
+
+    // Check if this is one of our custom pool tokens
+    const isCustomPoolToken = [
+      CUSTOM_CONTRACTS.tokenA.toLowerCase(),
+      CUSTOM_CONTRACTS.tokenB.toLowerCase()
+    ].includes(tokenAddress.toLowerCase());
+
+    // Check if this is a testnet token (case-insensitive comparison)
+    const isTestnetToken = Object.values(TESTNET_TOKENS).some(token => 
+      token.toLowerCase() === tokenAddress.toLowerCase()
+    );
+    console.log(`🔍 Token detection: ${tokenAddress.toLowerCase()}`);
+    console.log(`🔍 Testnet tokens:`, Object.values(TESTNET_TOKENS).map(t => t.toLowerCase()));
+    console.log(`🔍 Is testnet token: ${isTestnetToken}`);
+
+    if (isTestnetToken) {
+      console.log(`🎯 Processing testnet token: ${tokenAddress}`);
+      // Initialize TestnetSwap for testnet trading
+      const testnetSwap = new TestnetSwap(provider, wallet);
       
-      // Get the guidance message with the actual token symbol
-      const { getLiquidityGuidance } = require('./utils/dex');
-      const guidance = getLiquidityGuidance(tokenAddress, tokenInfo.symbol);
-      
-      await ctx.reply(guidance, {
-        parse_mode: 'Markdown',
-        ...Markup.inlineKeyboard([
-          [
-            Markup.button.callback('🔄 Try Again', `refresh_token_${tokenAddress}`),
-            Markup.button.callback('🏠 Main Menu', 'main_menu')
-          ],
-          [
-            Markup.button.callback('🌐 QuickSwap', 'https://quickswap.exchange/#/swap?chain=somnia'),
-            Markup.button.callback('🔍 Explorer', 'https://shannon-explorer.somnia.network')
-          ]
-        ]),
-        disable_web_page_preview: true
-      });
-      
-      // Auto-delete the original address message after 10 seconds
-      setTimeout(async () => {
-        try {
-          await ctx.deleteMessage(ctx.message.message_id);
-        } catch (error) {
-          console.log('Could not delete original message:', error.message);
+      try {
+        // Get token info
+        const testnetTokenInfo = await testnetSwap.getTokenInfo(tokenAddress);
+        console.log(`📋 Testnet token info:`, testnetTokenInfo);
+        
+        const tokenBalance = await testnetSwap.getWalletBalance(tokenAddress);
+        console.log(`💰 Token balance:`, tokenBalance);
+        
+        // Estimate swaps for different amounts
+        const swapAmounts = [0.1, 1, 5];
+        let amountEstimates = {};
+        
+        for (const amount of swapAmounts) {
+          try {
+            const estimate = await testnetSwap.estimateSwap(TESTNET_TOKENS.stt, tokenAddress, amount);
+            if (estimate.success) {
+              amountEstimates[amount.toString()] = estimate.amountOut.toFixed(6);
+            } else {
+              amountEstimates[amount.toString()] = '0';
+            }
+          } catch (error) {
+            console.log(`⚠️ Could not estimate for ${amount} STT:`, error.message);
+            amountEstimates[amount.toString()] = '0';
+          }
         }
-      }, 10000);
-      
-      return;
+
+        // Ensure session is initialized
+        if (!ctx.session) ctx.session = {};
+        
+        // Set session for testnet trading
+        ctx.session.currentToken = {
+          address: tokenAddress,
+          info: {
+            ...tokenInfo,
+            decimals: tokenInfo.decimals.toString()
+          },
+          estimates: amountEstimates,
+          isTestnet: true,
+          testnetInfo: testnetTokenInfo
+        };
+
+        // Create buy/sell buttons for testnet
+        const buyButtons = [
+          [
+            Markup.button.callback('Buy 0.1 STT', `buy_amount_0.1_${tokenAddress}`),
+            Markup.button.callback('Buy 1 STT', `buy_amount_1_${tokenAddress}`),
+            Markup.button.callback('Buy 5 STT', `buy_amount_5_${tokenAddress}`)
+          ]
+        ];
+        
+        const sellButtons = [
+          [
+            Markup.button.callback('Sell 25%', `sell_percent_25_${tokenAddress}`),
+            Markup.button.callback('Sell 50%', `sell_percent_50_${tokenAddress}`),
+            Markup.button.callback('Sell 100%', `sell_percent_100_${tokenAddress}`)
+          ]
+        ];
+
+        const buttons = Markup.inlineKeyboard([
+          ...buyButtons,
+          ...sellButtons,
+          [Markup.button.callback('🏠 Menu', 'main_menu')]
+        ]);
+
+        await ctx.reply(
+          `🪙 *${tokenInfo.symbol}* — ${tokenInfo.name}\n` +
+          `📬 Address: \`${tokenAddress}\`\n` +
+          `💰 Your STT Balance: ${formattedBalance} STT\n` +
+          `🪙 Your ${tokenInfo.symbol} Balance: ${tokenBalance}\n` +
+          `🎯 Testnet Token (No Liquidity Required)\n` +
+          `💱 Exchange Rate: 1 STT = ${testnetSwap.exchangeRates[testnetTokenInfo.symbol] || 'N/A'} ${testnetTokenInfo.symbol}\n\n` +
+          `*Testnet Trading Available*\nSelect an action:`,
+          { parse_mode: 'Markdown', ...buttons }
+        );
+        return;
+      } catch (error) {
+        console.error('❌ Error setting up testnet trading:', error);
+        console.error('❌ Error details:', error.message);
+        console.error('❌ Error stack:', error.stack);
+        // Fall back to default behavior
+      }
     }
-    // Calculate price impact (simplified)
-    const priceImpact = '0.5'; // This would be calculated based on liquidity
-    // Store in session for later use
-    ctx.session = {
-      ...ctx.session,
-      currentToken: {
+
+    if (isCustomPoolToken) {
+      // Initialize CustomSwap for real trading
+      const customSwap = new CustomSwap(process.env.RPC_URL, process.env.PRIVATE_KEY);
+      
+      try {
+        // Get pool information
+        const poolInfo = await customSwap.getPoolInfo();
+        console.log('📊 Pool info retrieved for custom swap');
+        
+        // Get token balances
+        const tokenBalance = await customSwap.getWalletBalance(tokenAddress, wallet.address);
+        console.log(`💰 Token balance: ${tokenBalance.formattedBalance}`);
+        
+        // Estimate swaps for different amounts
+        const swapAmounts = [0.1, 1, 5];
+    let amountEstimates = {};
+        
+        for (const amount of swapAmounts) {
+          try {
+            const amountIn = ethers.parseUnits(amount.toString(), 18);
+            const estimatedOutput = await customSwap.estimateSwap(
+              CUSTOM_CONTRACTS.tokenA, // Assuming STT is tokenA
+              tokenAddress,
+              amountIn
+            );
+            amountEstimates[amount.toString()] = estimatedOutput.toString();
+    } catch (error) {
+            console.log(`⚠️ Could not estimate for ${amount} STT:`, error.message);
+            amountEstimates[amount.toString()] = '0';
+          }
+        }
+
+        // Ensure session is initialized
+        if (!ctx.session) ctx.session = {};
+        
+        // Set session for custom pool trading
+        ctx.session.currentToken = {
         address: tokenAddress,
-        info: tokenInfo,
-        estimates: amountEstimates
+          info: {
+            ...tokenInfo,
+            decimals: tokenInfo.decimals.toString()
+          },
+          estimates: amountEstimates,
+          isCustomPool: true,
+          poolInfo: {
+            token0: poolInfo.token0,
+            token1: poolInfo.token1,
+            fee: poolInfo.fee,
+            liquidity: poolInfo.liquidity.toString()
       }
     };
+
+        // Create buy/sell buttons for custom pool
+        const buyButtons = [
+          [
+            Markup.button.callback('Buy 0.1 STT', `buy_amount_0.1_${tokenAddress}`),
+            Markup.button.callback('Buy 1 STT', `buy_amount_1_${tokenAddress}`),
+            Markup.button.callback('Buy 5 STT', `buy_amount_5_${tokenAddress}`)
+          ]
+        ];
+        
+        const sellButtons = [
+          [
+            Markup.button.callback('Sell 25%', `sell_percent_25_${tokenAddress}`),
+            Markup.button.callback('Sell 50%', `sell_percent_50_${tokenAddress}`),
+            Markup.button.callback('Sell 100%', `sell_percent_100_${tokenAddress}`)
+          ]
+        ];
+
+        const buttons = Markup.inlineKeyboard([
+          ...buyButtons,
+          ...sellButtons,
+          [Markup.button.callback('🏠 Menu', 'main_menu')]
+        ]);
+
+        await ctx.reply(
+          `🪙 *${tokenInfo.symbol}* — ${tokenInfo.name}\n` +
+          `📬 Address: \`${tokenAddress}\`\n` +
+          `💰 Your STT Balance: ${formattedBalance} STT\n` +
+          `🪙 Your ${tokenInfo.symbol} Balance: ${tokenBalance.formattedBalance}\n` +
+          `🏊 Pool Liquidity: ${ethers.formatUnits(poolInfo.liquidity, 18)}\n` +
+          `💸 Fee: ${poolInfo.fee} bps\n\n` +
+          `*Custom Pool Trading Available*\nSelect an action:`,
+          { parse_mode: 'Markdown', ...buttons }
+        );
+        return;
+      } catch (error) {
+        console.error('❌ Error setting up custom pool trading:', error);
+        // Fall back to default behavior
+      }
+    }
+
+    // Default behavior for other tokens
+    const sttAmounts = [0.1, 1, 5];
+    let amountEstimates = {};
+    
     // Calculate estimated output for 1 STT
     const oneSTTEstimate = amountEstimates['1'];
     const formattedOutput = oneSTTEstimate 
       ? parseFloat(ethers.formatUnits(oneSTTEstimate, tokenInfo.decimals)).toFixed(6) 
       : 'N/A';
-    // Render token dashboard
-    const message = `🪙 *${tokenInfo.symbol}* — ${tokenInfo.name}  \n📬 Address: \`${tokenAddress}\`  \n💰 Your STT Balance: ${formattedBalance} STT  \n📈 Estimated output: ~${formattedOutput} ${tokenInfo.symbol}  \n💹 Price Impact: ~${priceImpact}%\n\nYou can trade this token directly using the options below.`;
+    
+    const message = `🪙 *${tokenInfo.symbol}* — ${tokenInfo.name}  \n📬 Address: \`${tokenAddress}\`  \n💰 Your STT Balance: ${formattedBalance} STT  \n📈 Estimated output: ~${formattedOutput} ${tokenInfo.symbol}  \n💹 Price Impact: ~0.5%\n\nYou can trade this token directly using the options below.`;
+    
     const buttons = Markup.inlineKeyboard([
       [
         Markup.button.callback('⬅ Back', 'main_menu'),
@@ -207,27 +393,9 @@ async function handleTokenAddressInput(ctx, tokenAddress) {
       [
         Markup.button.callback('✅ STT', 'stt_balance'),
         Markup.button.callback('⚙️ Settings', 'settings')
-      ],
-      [
-        Markup.button.callback('✅ Swap', `swap_token_${tokenAddress}`),
-        Markup.button.callback('Limit', `limit_token_${tokenAddress}`),
-        Markup.button.callback('DCA', `dca_token_${tokenAddress}`)
-      ],
-      [
-        Markup.button.callback('0.1 STT', `amount_0.1_${tokenAddress}`),
-        Markup.button.callback('1 STT', `amount_1_${tokenAddress}`),
-        Markup.button.callback('5 STT', `amount_5_${tokenAddress}`)
-      ],
-      [
-        Markup.button.callback('1% Slippage', `slippage_1_${tokenAddress}`),
-        Markup.button.callback('✏️ Custom Slippage', `custom_slippage_${tokenAddress}`)
-      ],
-      [
-        Markup.button.callback('🚀 BUY', `buy_execute_${tokenAddress}`)
       ]
     ]);
-    // Delete loading message and show token dashboard
-    await ctx.deleteMessage(loadingMsg.message_id);
+    
     await ctx.reply(message, { parse_mode: 'Markdown', ...buttons });
 
     // Auto-delete the original address message after 10 seconds
@@ -238,7 +406,6 @@ async function handleTokenAddressInput(ctx, tokenAddress) {
         console.log('Could not delete original message:', error.message);
       }
     }, 10000);
-
   } catch (error) {
     console.error('Error handling token address input:', error);
     await ctx.reply('❌ Error loading token info. Please try again.', Markup.inlineKeyboard([
@@ -287,6 +454,8 @@ bot.action('main_menu', async (ctx) => {
 // Trade handlers
 bot.action('trade', handleTrade);
 bot.action(/trade_token_(.+)/, handleTokenSelection);
+// Move this registration to be above the generic buy/sell handler
+bot.action(/buy_amount_(.+)_(.+)/, handleBuyAmountDirect);
 bot.action(/^(buy|sell)_(.+)$/, handleTradeAction);
 bot.action(/amount_(.+)_(buy|sell)_(.+)/, handleAmountSelection);
 bot.action(/confirm_(buy|sell)_(.+)_(.+)/, handleTradeConfirmation);
@@ -294,7 +463,6 @@ bot.action('trade_history', handleTradeHistory);
 bot.action('trade_farm', handleFarm);
 
 // Direct token address handlers
-bot.action(/buy_amount_(.+)_(.+)/, handleBuyAmountDirect);
 bot.action(/refresh_token_(.+)/, handleRefreshToken);
 bot.action(/swap_last_(.+)/, handleSwapLast);
 bot.action(/confirm_swap_(.+)_(.+)/, handleConfirmSwap);
@@ -381,31 +549,238 @@ bot.action('bridge_how', handleBridgeHowItWorks);
 bot.action(/bridge_(sepolia|mumbai|bsc)/, handleBridgeSource);
 bot.action(/confirm_bridge_(sepolia|mumbai|bsc)/, handleBridgeConfirmationTestnet);
 
-// Legacy handlers for backward compatibility
-bot.action('buy', async (ctx) => {
-  await ctx.editMessageText(
-    '🔄 *Trading*\n\nSelect a token to trade:',
-    {
-      parse_mode: 'Markdown',
-      ...Markup.inlineKeyboard([
-        [
-          Markup.button.callback('💰 USDT.g', 'trade_token_USDT.g'),
-          Markup.button.callback('🚀 NIA', 'trade_token_NIA'),
-          Markup.button.callback('🏓 PING', 'trade_token_PING')
-        ],
-        [
-          Markup.button.callback('🏓 PONG', 'trade_token_PONG'),
-          Markup.button.callback('📊 Portfolio', 'trade_portfolio'),
-          Markup.button.callback('📈 History', 'trade_history')
-        ],
-        [
-          Markup.button.callback('🌾 Farm', 'trade_farm'),
-          Markup.button.callback('🔄 Refresh', 'refresh'),
-          Markup.button.callback('🏠 Menu', 'main_menu')
-        ]
-      ])
+// Buy button - Main trading interface
+// Quick trade handlers for testnet tokens
+// Portfolio handler
+bot.action('trade_portfolio', async (ctx) => {
+  try {
+    const wallet = await getUserWallet(ctx.from.id);
+    if (!wallet) {
+      await ctx.editMessageText(
+        '❌ *No Wallet Found*\n\nPlease create a wallet first.',
+        {
+          parse_mode: 'Markdown',
+          ...Markup.inlineKeyboard([
+            [Markup.button.callback('💼 Create Wallet', 'create_wallet')],
+            [Markup.button.callback('⬅️ Back', 'buy')]
+          ])
+        }
+      );
+      return;
     }
-  );
+
+    const provider = new ethers.JsonRpcProvider(process.env.RPC_URL);
+    const sttBalance = await provider.getBalance(wallet.address);
+    const formattedSTT = parseFloat(ethers.formatUnits(sttBalance, 18)).toFixed(3);
+
+    // Get user's fake balances and positions
+    const userData = getUserData(ctx.from.id);
+    const fakeSTTBalance = userData.balance.stt.toFixed(3);
+    const positions = userData.positions || {};
+    
+    // Build positions text
+    let positionsText = '';
+    if (Object.keys(positions).length === 0) {
+      positionsText = 'No testnet positions yet. Start trading!';
+    } else {
+      for (const [token, amount] of Object.entries(positions)) {
+        const symbol = token.toUpperCase();
+        const emoji = symbol === 'PING' ? '🏓' : symbol === 'INSOM' ? '🪙' : '🪙';
+        positionsText += `${emoji} ${symbol}: ${Number(amount).toFixed(6)}\n`;
+      }
+    }
+
+    await ctx.editMessageText(
+      `📊 *Your Portfolio*\n\n` +
+      `💰 STT Balance: ${fakeSTTBalance} STT\n` +
+      `📬 Wallet: \`${wallet.address}\`\n\n` +
+      `*Testnet Token Positions:*\n` +
+      `${positionsText}\n\n` +
+      `*Total Portfolio Value:* ${fakeSTTBalance} STT`,
+      {
+        parse_mode: 'Markdown',
+        ...Markup.inlineKeyboard([
+          [
+            Markup.button.callback('🔄 Refresh', 'trade_portfolio'),
+            Markup.button.callback('📈 History', 'trade_history')
+          ],
+          [Markup.button.callback('⬅️ Back to Trading', 'buy')]
+        ])
+      }
+    );
+  } catch (error) {
+    console.error('Error loading portfolio:', error);
+    await ctx.editMessageText(
+      '❌ *Error*\n\nFailed to load portfolio. Please try again.',
+      {
+        parse_mode: 'Markdown',
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback('🔄 Try Again', 'trade_portfolio')],
+          [Markup.button.callback('⬅️ Back', 'buy')]
+        ])
+      }
+    );
+  }
+});
+
+// Trade history handler
+bot.action('trade_history', async (ctx) => {
+  try {
+    const wallet = await getUserWallet(ctx.from.id);
+    if (!wallet) {
+      await ctx.editMessageText(
+        '❌ *No Wallet Found*\n\nPlease create a wallet first.',
+        {
+          parse_mode: 'Markdown',
+          ...Markup.inlineKeyboard([
+            [Markup.button.callback('💼 Create Wallet', 'create_wallet')],
+            [Markup.button.callback('⬅️ Back', 'buy')]
+          ])
+        }
+      );
+      return;
+    }
+
+    await ctx.editMessageText(
+      `📈 *Trade History*\n\n` +
+      `📬 Wallet: \`${wallet.address}\`\n\n` +
+      `*Recent Trades:*\n` +
+      `No trades found yet.\n\n` +
+      `Start trading to see your history here!`,
+      {
+        parse_mode: 'Markdown',
+        ...Markup.inlineKeyboard([
+          [
+            Markup.button.callback('🔄 Refresh', 'trade_history'),
+            Markup.button.callback('📊 Portfolio', 'trade_portfolio')
+          ],
+          [Markup.button.callback('⬅️ Back to Trading', 'buy')]
+        ])
+      }
+    );
+  } catch (error) {
+    console.error('Error loading trade history:', error);
+    await ctx.editMessageText(
+      '❌ *Error*\n\nFailed to load trade history. Please try again.',
+      {
+        parse_mode: 'Markdown',
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback('🔄 Try Again', 'trade_history')],
+          [Markup.button.callback('⬅️ Back', 'buy')]
+        ])
+      }
+    );
+  }
+});
+
+// Quick trade handlers for testnet tokens
+bot.action(/quick_trade_(PING|INSOM|STT)/, async (ctx) => {
+  try {
+    const tokenType = ctx.match[1];
+    let tokenAddress, tokenName, tokenSymbol;
+    
+    switch (tokenType) {
+      case 'PING':
+        tokenAddress = '0x33E7fAB0a8a5da1A923180989bD617c9c2D1C493';
+        tokenName = 'Ping Token';
+        tokenSymbol = 'PING';
+        break;
+      case 'INSOM':
+        tokenAddress = '0x0C726E446865FFb19Cc13f21aBf0F515106C9662';
+        tokenName = 'Insomiacs';
+        tokenSymbol = 'INSOM';
+        break;
+      case 'STT':
+        tokenAddress = '0x4A3BC48C156384f9564Fd65A53a2f3D534D8f2b7';
+        tokenName = 'Somnia Testnet Token';
+        tokenSymbol = 'STT';
+        break;
+      default:
+        await ctx.editMessageText('❌ Invalid token type');
+        return;
+    }
+    
+    // Simulate the token address input to reuse existing logic
+    await handleTokenAddressInput(ctx, tokenAddress);
+    
+  } catch (error) {
+    console.error('Error in quick trade:', error);
+    await ctx.editMessageText(
+      '❌ *Error*\n\nFailed to load token info. Please try again.',
+      {
+        parse_mode: 'Markdown',
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback('🔄 Try Again', 'buy')],
+          [Markup.button.callback('⬅️ Back to Menu', 'main_menu')]
+        ])
+      }
+    );
+  }
+});
+
+bot.action('buy', async (ctx) => {
+  try {
+    const wallet = await getUserWallet(ctx.from.id);
+    if (!wallet) {
+      await ctx.editMessageText(
+        '❌ *No Wallet Found*\n\nPlease create a wallet first to start trading.',
+        {
+          parse_mode: 'Markdown',
+          ...Markup.inlineKeyboard([
+            [Markup.button.callback('💼 Create Wallet', 'create_wallet')],
+            [Markup.button.callback('⬅️ Back to Menu', 'main_menu')]
+          ])
+        }
+      );
+      return;
+    }
+
+    // Get STT balance
+    const provider = new ethers.JsonRpcProvider(process.env.RPC_URL);
+    const sttBalance = await provider.getBalance(wallet.address);
+    const formattedBalance = parseFloat(ethers.formatUnits(sttBalance, 18)).toFixed(3);
+
+    await ctx.editMessageText(
+      `🔄 *Trading Interface*\n\n` +
+      `💰 Your STT Balance: ${formattedBalance} STT\n` +
+      `📬 Wallet: \`${wallet.address}\`\n\n` +
+      `*How to trade:*\n` +
+      `1️⃣ Send any token contract address\n` +
+      `2️⃣ View token info and trading options\n` +
+      `3️⃣ Use Buy/Sell buttons to trade\n\n` +
+      `*Quick Trade Testnet Tokens:*`,
+      {
+        parse_mode: 'Markdown',
+        ...Markup.inlineKeyboard([
+          [
+            Markup.button.callback('🏓 PING', 'quick_trade_PING'),
+            Markup.button.callback('🪙 INSOM', 'quick_trade_INSOM'),
+            Markup.button.callback('💰 STT', 'quick_trade_STT')
+          ],
+          [
+            Markup.button.callback('📊 Portfolio', 'trade_portfolio'),
+            Markup.button.callback('📈 History', 'trade_history')
+          ],
+          [
+            Markup.button.callback('🔄 Refresh', 'buy'),
+            Markup.button.callback('🏠 Menu', 'main_menu')
+          ]
+        ])
+      }
+    );
+  } catch (error) {
+    console.error('Error in buy menu:', error);
+    await ctx.editMessageText(
+      '❌ *Error*\n\nFailed to load trading interface. Please try again.',
+      {
+        parse_mode: 'Markdown',
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback('🔄 Try Again', 'buy')],
+          [Markup.button.callback('⬅️ Back to Menu', 'main_menu')]
+        ])
+      }
+    );
+  }
 });
 
 // Utility function to escape MarkdownV2 special characters
@@ -812,19 +1187,11 @@ async function handleBuyAmountDirect(ctx) {
   try {
     const amount = ctx.match[1];
     const tokenAddress = ctx.match[2];
-    
-    // Get session data
     const session = ctx.session?.currentToken;
+
+    // Check if session is valid
     if (!session || session.address !== tokenAddress) {
-      await ctx.editMessageText(
-        '❌ *Session Expired*\n\nPlease send the token address again.',
-        {
-          parse_mode: 'Markdown',
-          ...Markup.inlineKeyboard([
-            [Markup.button.callback('⬅️ Back to Menu', 'main_menu')]
-          ])
-        }
-      );
+      await ctx.reply('❌ Session expired or invalid. Please scan the token again.');
       return;
     }
 
@@ -832,31 +1199,155 @@ async function handleBuyAmountDirect(ctx) {
     const estimatedOutput = session.estimates[amount];
     
     if (!estimatedOutput) {
-      await ctx.editMessageText(
-        '❌ *Invalid Amount or No Liquidity*\n\nPlease select a different amount or try another token.',
-        {
-          parse_mode: 'Markdown',
-          ...Markup.inlineKeyboard([
-            [Markup.button.callback('🔄 Refresh', `refresh_token_${tokenAddress}`)],
-            [Markup.button.callback('⬅️ Back', 'main_menu')]
-          ])
-        }
-      );
+      await ctx.reply('❌ Could not estimate output for this amount. Please try again.');
       return;
     }
 
-    // Store selected amount in session
+    // Check if this is a testnet token
+    if (session.isTestnet) {
+      console.log('🚀 Executing testnet buy...');
+      
+      try {
+        // Get user's wallet
+        const wallet = await getUserWallet(ctx.from.id);
+        if (!wallet) {
+          await ctx.reply('❌ No wallet found. Please create a wallet first.');
+          return;
+        }
+
+        // Initialize TestnetSwap
+        const provider = new ethers.JsonRpcProvider(process.env.RPC_URL);
+        const testnetSwap = new TestnetSwap(provider, wallet);
+
+        // Execute the testnet swap
+        const swapResult = await testnetSwap.executeSwap(
+          TESTNET_TOKENS.stt, // STT
+          tokenAddress, // Target token
+          parseFloat(amount)
+        );
+
+        if (swapResult.success) {
+          // Update user's fake balance and position
+          const userData = getUserData(ctx.from.id);
+          const newSTTBalance = userData.balance.stt - swapResult.amountIn;
+          const newTokenPosition = userData.positions[tokenInfo.symbol.toLowerCase()] || 0;
+          const newTokenAmount = newTokenPosition + swapResult.amountOut;
+          
+          // Update database
+          setUserBalance(ctx.from.id, newSTTBalance, userData.balance.insom);
+          updateUserPosition(ctx.from.id, tokenInfo.symbol, newTokenAmount);
+          
+          await ctx.reply(
+            `✅ *Testnet Buy Complete!*\n\n` +
+            `💰 Spent: ${swapResult.amountIn} STT\n` +
+            `🪙 Received: ${swapResult.amountOut.toFixed(6)} ${tokenInfo.symbol}\n` +
+            `💱 Rate: 1 STT = ${swapResult.rate} ${tokenInfo.symbol}\n` +
+            `🔗 Transaction: \`${swapResult.txHash}\`\n\n` +
+            `📊 *New Balances:*\n` +
+            `💰 STT: ${newSTTBalance.toFixed(3)}\n` +
+            `🪙 ${tokenInfo.symbol}: ${newTokenAmount.toFixed(6)}`,
+            {
+              parse_mode: 'Markdown',
+              ...Markup.inlineKeyboard([
+                [Markup.button.callback('🏠 Menu', 'main_menu')]
+              ])
+            }
+          );
+        } else {
+          throw new Error(swapResult.error || 'Swap failed');
+        }
+      } catch (error) {
+        console.error('❌ Testnet buy error:', error);
+        await ctx.reply(
+          '❌ *Testnet Swap Failed*\n\n' +
+          'The testnet swap could not be executed. Please try again.',
+          {
+            parse_mode: 'Markdown',
+            ...Markup.inlineKeyboard([
+              [Markup.button.callback('🔄 Try Again', `buy_amount_${amount}_${tokenAddress}`)],
+              [Markup.button.callback('🏠 Menu', 'main_menu')]
+            ])
+          }
+        );
+      }
+      return;
+    }
+
+    // Check if this is a custom pool token
+    if (session.isCustomPool) {
+      console.log('🚀 Executing custom pool buy...');
+      
+      try {
+        // Initialize CustomSwap
+        const customSwap = new CustomSwap(process.env.RPC_URL, process.env.PRIVATE_KEY);
+        
+        // Get user's wallet
+        const wallet = await getUserWallet(ctx.from.id);
+        if (!wallet) {
+          await ctx.reply('❌ No wallet found. Please create a wallet first.');
+          return;
+        }
+
+        // Check STT balance
+        const provider = new ethers.JsonRpcProvider(process.env.RPC_URL);
+        const sttBalance = await getSTTBalance(wallet.address, provider);
+        const amountIn = ethers.parseUnits(amount, 18);
+        
+        if (sttBalance < amountIn) {
+          await ctx.reply('❌ Insufficient STT balance for this swap.');
+          return;
+        }
+
+        // Execute the swap
+        const swapResult = await customSwap.executeSwap(
+          CUSTOM_CONTRACTS.tokenA, // STT
+          tokenAddress, // Target token
+          amountIn,
+          BigInt(estimatedOutput)
+        );
+
+        if (swapResult.success) {
+          await ctx.reply(
+            `✅ *Custom Pool Buy Complete!*\n\n` +
+            `💰 Spent: ${swapResult.amountIn} STT\n` +
+            `🪙 Received: ${swapResult.amountOut} ${tokenInfo.symbol}\n` +
+            `🔗 Transaction: \`${swapResult.txHash}\`\n\n` +
+            `*Real swap executed on custom pool!*`,
+            {
+              parse_mode: 'Markdown',
+              ...Markup.inlineKeyboard([
+                [Markup.button.callback('🏠 Menu', 'main_menu')]
+              ])
+            }
+          );
+        } else {
+          throw new Error('Swap failed');
+        }
+      } catch (error) {
+        console.error('❌ Custom pool buy error:', error);
+        await ctx.reply(
+          '❌ *Swap Failed*\n\n' +
+          'The swap could not be executed. Please try again or check your balance.',
+          {
+            parse_mode: 'Markdown',
+            ...Markup.inlineKeyboard([
+              [Markup.button.callback('🔄 Try Again', `buy_amount_${amount}_${tokenAddress}`)],
+              [Markup.button.callback('🏠 Menu', 'main_menu')]
+            ])
+          }
+        );
+      }
+      return;
+    }
+
+    // Default behavior for non-custom pool tokens
     ctx.session.currentToken.selectedAmount = amount;
     ctx.session.currentToken.estimatedOutput = estimatedOutput;
-
-    // Show swap confirmation
     const { renderSwapConfirmation } = require('./utils/menus');
     const { message, buttons } = renderSwapConfirmation(tokenInfo, amount, estimatedOutput, tokenAddress);
-    
     await ctx.editMessageText(message, { parse_mode: 'Markdown', ...buttons });
-
   } catch (error) {
-    console.error('Error handling buy amount direct:', error);
+    console.error('Error handling buy amount direct:', error, ctx.update?.callback_query?.data);
     await ctx.editMessageText(
       '❌ *Error Processing Request*\n\nSomething went wrong. Please try again.',
       {
@@ -992,7 +1483,7 @@ async function handleConfirmSwap(ctx) {
   try {
     const amount = ctx.match[1];
     const tokenAddress = ctx.match[2];
-    
+    const INSOMNIACS = '0x0C726E446865FFb19Cc13f21aBf0F515106C9662';
     const session = ctx.session?.currentToken;
     if (!session) {
       await ctx.editMessageText(
@@ -1007,6 +1498,42 @@ async function handleConfirmSwap(ctx) {
       return;
     }
 
+    // Special fake swap for Insomniacs token
+    if (tokenAddress.toLowerCase() === INSOMNIACS.toLowerCase()) {
+      const { getFakeSTTBalance, setFakeSTTBalance, addFakePosition } = require('./utils/database');
+      const userId = ctx.from.id;
+      const sttBalance = await getFakeSTTBalance(userId);
+      const amountNum = Number(amount);
+      if (sttBalance < amountNum) {
+        await ctx.editMessageText(
+          `❌ *Insufficient STT balance for test swap.*\n\nYour fake STT balance: ${sttBalance}`,
+          { parse_mode: 'Markdown', ...Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', `refresh_token_${tokenAddress}`)]]) }
+        );
+        return;
+      }
+      // Deduct STT
+      await setFakeSTTBalance(userId, sttBalance - amountNum);
+      // Add to positions
+      await addFakePosition(userId, {
+        address: tokenAddress,
+        symbol: session.info.symbol,
+        name: session.info.name,
+        amount: session.estimatedOutput.toString(),
+        decimals: session.info.decimals
+      });
+      // Show confirmation
+      await ctx.editMessageText(
+        `✅ *Fake Swap Complete!*\n\n- Spent: ${amount} STT\n- Received: ~${parseFloat(session.estimatedOutput).toFixed(6)} ${session.info.symbol}\n- New STT Balance: ${sttBalance - amountNum} (test)\n\n*This was a test swap. No real tokens were moved.*`,
+        {
+          parse_mode: 'Markdown',
+          ...Markup.inlineKeyboard([
+            [Markup.button.callback('🔄 Refresh', `refresh_token_${tokenAddress}`)],
+            [Markup.button.callback('🏠 Menu', 'main_menu')]
+          ])
+        }
+      );
+      return;
+    }
     // Get wallet
     const wallet = await getUserWallet(ctx.from.id);
     if (!wallet) {
@@ -1074,7 +1601,7 @@ async function handleConfirmSwap(ctx) {
         {
           caption: `✅ *Swap Successful!*\n\n` +
                    `📤 Sent: ${amount} STT\n` +
-                   `📥 Received: ~${parseFloat(ethers.formatUnits(estimatedOutput, session.info.decimals)).toFixed(6)} ${session.info.symbol}\n` +
+                   `📥 Received: ~${parseFloat(estimatedOutput).toFixed(6)} ${session.info.symbol}\n` +
                    `🔗 Tx: \`${result.txHash}\``,
           parse_mode: 'Markdown',
           ...Markup.inlineKeyboard([
@@ -1316,7 +1843,7 @@ async function handleTokenAmountSelection(ctx) {
     // Show confirmation
     const estimatedOutput = session.estimates[amount];
     const formattedOutput = estimatedOutput 
-      ? parseFloat(ethers.formatUnits(estimatedOutput, session.info.decimals)).toFixed(6) 
+      ? parseFloat(estimatedOutput).toFixed(6) 
       : 'N/A';
 
     await ctx.editMessageText(
@@ -1473,7 +2000,7 @@ async function handleBuyExecute(ctx) {
 
     // Show final confirmation
     const formattedOutput = estimatedOutput 
-      ? parseFloat(ethers.formatUnits(estimatedOutput, session.info.decimals)).toFixed(6) 
+      ? parseFloat(estimatedOutput).toFixed(6) 
       : 'N/A';
 
     await ctx.editMessageText(
@@ -1502,6 +2029,208 @@ async function handleBuyExecute(ctx) {
     await ctx.reply('❌ Error processing request. Please try again.');
   }
 }
+
+// Handler for fake sell percent for Insomniacs
+async function handleSellPercentDirect(ctx) {
+  try {
+    console.log('handleSellPercentDirect triggered', ctx.match);
+    const percent = Number(ctx.match[1]);
+    const tokenAddress = ctx.match[2];
+    const session = ctx.session?.currentToken;
+
+    // Check if session is valid
+    if (!session || session.address !== tokenAddress) {
+      await ctx.reply('❌ Session expired or invalid. Please scan the token again.');
+      return;
+    }
+
+    // Check if this is a testnet token
+    if (session.isTestnet) {
+      console.log('🚀 Executing testnet sell...');
+      
+      try {
+        // Get user's wallet
+        const wallet = await getUserWallet(ctx.from.id);
+        if (!wallet) {
+          await ctx.reply('❌ No wallet found. Please create a wallet first.');
+          return;
+        }
+
+        // Initialize TestnetSwap
+        const provider = new ethers.JsonRpcProvider(process.env.RPC_URL);
+        const testnetSwap = new TestnetSwap(provider, wallet);
+
+        // Get token balance
+        const tokenBalance = await testnetSwap.getWalletBalance(tokenAddress);
+        const balanceNum = parseFloat(tokenBalance);
+        
+        if (balanceNum <= 0) {
+          await ctx.reply('❌ No tokens to sell.');
+          return;
+        }
+
+        // Calculate sell amount
+        const sellAmount = (balanceNum * percent) / 100;
+        
+        if (sellAmount <= 0) {
+          await ctx.reply('❌ Nothing to sell for this percentage.');
+          return;
+        }
+
+        // Execute the testnet sell (reverse swap)
+        const swapResult = await testnetSwap.executeSwap(
+          tokenAddress, // Token to sell
+          TESTNET_TOKENS.stt, // STT
+          sellAmount
+        );
+
+        if (swapResult.success) {
+          // Update user's fake balance and position
+          const userData = getUserData(ctx.from.id);
+          const newSTTBalance = userData.balance.stt + swapResult.amountOut;
+          const currentTokenPosition = userData.positions[session.info.symbol.toLowerCase()] || 0;
+          const newTokenPosition = currentTokenPosition - sellAmount;
+          
+          // Update database
+          setUserBalance(ctx.from.id, newSTTBalance, userData.balance.insom);
+          if (newTokenPosition > 0) {
+            updateUserPosition(ctx.from.id, session.info.symbol, newTokenPosition);
+          } else {
+            // Remove position if zero or negative
+            const db = loadDB();
+            if (db[ctx.from.id] && db[ctx.from.id].positions) {
+              delete db[ctx.from.id].positions[session.info.symbol.toLowerCase()];
+              saveDB(db);
+            }
+          }
+          
+          await ctx.reply(
+            `✅ *Testnet Sell Complete!*\n\n` +
+            `🪙 Sold: ${percent}% (~${sellAmount.toFixed(6)} ${session.info.symbol})\n` +
+            `💰 Received: ${swapResult.amountOut.toFixed(6)} STT\n` +
+            `💱 Rate: 1 ${session.info.symbol} = ${(1 / swapResult.rate).toFixed(6)} STT\n` +
+            `🔗 Transaction: \`${swapResult.txHash}\`\n\n` +
+            `📊 *New Balances:*\n` +
+            `💰 STT: ${newSTTBalance.toFixed(3)}\n` +
+            `🪙 ${session.info.symbol}: ${Math.max(0, newTokenPosition).toFixed(6)}`,
+            {
+              parse_mode: 'Markdown',
+              ...Markup.inlineKeyboard([
+                [Markup.button.callback('🏠 Menu', 'main_menu')]
+              ])
+            }
+          );
+        } else {
+          throw new Error(swapResult.error || 'Sell failed');
+        }
+      } catch (error) {
+        console.error('❌ Testnet sell error:', error);
+        await ctx.reply(
+          '❌ *Testnet Sell Failed*\n\n' +
+          'The testnet sell could not be executed. Please try again.',
+          {
+            parse_mode: 'Markdown',
+            ...Markup.inlineKeyboard([
+              [Markup.button.callback('🔄 Try Again', `sell_percent_${percent}_${tokenAddress}`)],
+              [Markup.button.callback('🏠 Menu', 'main_menu')]
+            ])
+          }
+        );
+      }
+      return;
+    }
+
+    // Check if this is a custom pool token
+    if (session.isCustomPool) {
+      console.log('🚀 Executing custom pool sell...');
+      
+      try {
+        // Initialize CustomSwap
+        const customSwap = new CustomSwap(process.env.RPC_URL, process.env.PRIVATE_KEY);
+        
+        // Get user's wallet
+        const wallet = await getUserWallet(ctx.from.id);
+        if (!wallet) {
+          await ctx.reply('❌ No wallet found. Please create a wallet first.');
+          return;
+        }
+
+        // Get token balance
+        const tokenBalance = await customSwap.getWalletBalance(tokenAddress, wallet.address);
+        const balanceBig = BigInt(tokenBalance.balance);
+        
+        if (balanceBig <= 0n) {
+          await ctx.reply('❌ No tokens to sell.');
+          return;
+        }
+
+        // Calculate sell amount
+        const sellAmount = (balanceBig * BigInt(percent)) / BigInt(100);
+        
+        if (sellAmount <= 0n) {
+          await ctx.reply('❌ Nothing to sell for this percentage.');
+          return;
+        }
+
+        // Execute the reverse swap (token -> STT)
+        const swapResult = await customSwap.executeSwap(
+          tokenAddress, // Token to sell
+          CUSTOM_CONTRACTS.tokenA, // STT
+          sellAmount,
+          0n // No minimum output for now
+        );
+
+        if (swapResult.success) {
+          await ctx.reply(
+            `✅ *Custom Pool Sell Complete!*\n\n` +
+            `🪙 Sold: ${percent}% (~${ethers.formatUnits(sellAmount, tokenBalance.decimals)} ${session.info.symbol})\n` +
+            `💰 Received: ${swapResult.amountOut} STT\n` +
+            `🔗 Transaction: \`${swapResult.txHash}\`\n\n` +
+            `*Real sell executed on custom pool!*`,
+      {
+        parse_mode: 'Markdown',
+        ...Markup.inlineKeyboard([
+                [Markup.button.callback('🏠 Menu', 'main_menu')]
+        ])
+      }
+    );
+        } else {
+          throw new Error('Sell failed');
+  }
+      } catch (error) {
+        console.error('❌ Custom pool sell error:', error);
+      await ctx.reply(
+          '❌ *Sell Failed*\n\n' +
+          'The sell could not be executed. Please try again or check your balance.',
+        {
+          parse_mode: 'Markdown',
+          ...Markup.inlineKeyboard([
+              [Markup.button.callback('🔄 Try Again', `sell_percent_${percent}_${tokenAddress}`)],
+              [Markup.button.callback('🏠 Menu', 'main_menu')]
+          ])
+        }
+      );
+      }
+      return;
+    }
+
+    // Default behavior for non-custom pool tokens
+    await ctx.reply('❌ Sell functionality not available for this token.');
+    } catch (error) {
+    console.error('Error handling sell percent direct:', error, ctx.update?.callback_query?.data);
+    await ctx.editMessageText(
+      '❌ *Error Processing Sell*\n\nSomething went wrong. Please try again.',
+      {
+        parse_mode: 'Markdown',
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback('⬅️ Back', 'main_menu')]
+        ])
+      }
+    );
+  }
+}
+
+// Custom pool trading handlers are now integrated into handleBuyAmountDirect and handleSellPercentDirect
 
 // Setup Express server for Railway health checks
 const app = express();

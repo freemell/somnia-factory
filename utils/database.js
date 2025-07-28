@@ -1,4 +1,51 @@
 const { createClient } = require('@supabase/supabase-js');
+const fs = require('fs');
+const path = require('path');
+
+const DB_PATH = path.join(__dirname, '../db.json');
+
+function loadDB() {
+  if (!fs.existsSync(DB_PATH)) {
+    fs.writeFileSync(DB_PATH, JSON.stringify({}, null, 2));
+  }
+  return JSON.parse(fs.readFileSync(DB_PATH, 'utf8'));
+}
+
+function saveDB(db) {
+  fs.writeFileSync(DB_PATH, JSON.stringify(db, null, 2));
+}
+
+// Initialize user in db.json with actual balances
+function initUser(chatId, stt, insom) {
+  const db = loadDB();
+  if (!db[chatId]) {
+    db[chatId] = {
+      balance: { stt: Number(stt), insom: Number(insom) },
+      positions: { insom: 0 }
+    };
+    saveDB(db);
+  }
+}
+
+function getUserData(chatId) {
+  const db = loadDB();
+  return db[chatId] || { balance: { stt: 0, insom: 0 }, positions: { insom: 0 } };
+}
+
+function setUserBalance(chatId, stt, insom) {
+  const db = loadDB();
+  if (!db[chatId]) db[chatId] = { balance: { stt: 0, insom: 0 }, positions: { insom: 0 } };
+  db[chatId].balance = { stt, insom };
+  saveDB(db);
+}
+
+function updateUserPosition(chatId, tokenSymbol, amount) {
+  const db = loadDB();
+  if (!db[chatId]) db[chatId] = { balance: { stt: 0, insom: 0 }, positions: {} };
+  if (!db[chatId].positions) db[chatId].positions = {};
+  db[chatId].positions[tokenSymbol.toLowerCase()] = amount;
+  saveDB(db);
+}
 
 // Initialize Supabase client
 const supabase = createClient(
@@ -465,6 +512,110 @@ async function getWatchlist(userId) {
   }
 }
 
+// --- FAKE SWAP HELPERS ---
+
+// Get user's fake STT balance (from user_settings, or default to 100)
+async function getFakeSTTBalance(userId) {
+  const settings = await getUserSettings(userId);
+  if (settings && settings.fake_stt_balance !== undefined) {
+    return Number(settings.fake_stt_balance);
+  }
+  // Default starting balance
+  return 100;
+}
+
+// Set user's fake STT balance
+async function setFakeSTTBalance(userId, newBalance) {
+  const settings = await getUserSettings(userId) || {};
+  settings.fake_stt_balance = newBalance;
+  await saveUserSettings(userId, settings);
+}
+
+// Get user's fake positions (from user_settings, or empty array)
+async function getFakePositions(userId) {
+  const settings = await getUserSettings(userId);
+  if (settings && settings.fake_positions) {
+    try {
+      return JSON.parse(settings.fake_positions);
+    } catch {
+      return [];
+    }
+  }
+  return [];
+}
+
+// Add a token to user's fake positions
+async function addFakePosition(userId, token) {
+  const positions = await getFakePositions(userId);
+  // If token already exists, add to amount
+  const idx = positions.findIndex(p => p.address === token.address);
+  // Ensure amount is string (BigInt-safe)
+  const addAmount = typeof token.amount === 'bigint' ? token.amount.toString() : token.amount;
+  if (idx >= 0) {
+    const prevAmount = typeof positions[idx].amount === 'bigint' ? positions[idx].amount.toString() : positions[idx].amount;
+    positions[idx].amount = (BigInt(prevAmount) + BigInt(addAmount)).toString();
+  } else {
+    positions.push({ ...token, amount: addAmount });
+  }
+  const settings = await getUserSettings(userId) || {};
+  settings.fake_positions = JSON.stringify(positions);
+  await saveUserSettings(userId, settings);
+}
+
+// Remove a percentage of a token from user's fake positions and credit STT
+async function removeFakePositionAmount(userId, tokenAddress, percent, sttPerToken) {
+  const positions = await getFakePositions(userId);
+  const idx = positions.findIndex(p => p.address === tokenAddress);
+  if (idx < 0) return;
+  const prevAmount = BigInt(positions[idx].amount);
+  const removeAmount = (prevAmount * BigInt(percent)) / BigInt(100);
+  positions[idx].amount = (prevAmount - removeAmount).toString();
+  if (positions[idx].amount === '0') positions.splice(idx, 1);
+  // Credit STT
+  const sttToCredit = removeAmount * BigInt(sttPerToken);
+  const settings = await getUserSettings(userId) || {};
+  let fakeStt = settings.fake_stt_balance ? BigInt(settings.fake_stt_balance) : BigInt(100);
+  fakeStt += sttToCredit;
+  settings.fake_stt_balance = fakeStt.toString();
+  settings.fake_positions = JSON.stringify(positions);
+  await saveUserSettings(userId, settings);
+}
+
+// Get fake STT balance for a user (chatId)
+function getFakeSTTBalance(chatId) {
+  const db = loadDB();
+  return db.balances[chatId] || 100; // Default to 100 STT for new users
+}
+
+// Set fake STT balance for a user (chatId)
+function setFakeSTTBalance(chatId, balance) {
+  const db = loadDB();
+  db.balances[chatId] = balance;
+  saveDB(db);
+}
+
+// Get fake positions for a user (chatId)
+function getFakePositions(chatId) {
+  const db = loadDB();
+  return db.positions[chatId] || [];
+}
+
+// Add a fake position for a user (chatId)
+function addFakePosition(chatId, position) {
+  const db = loadDB();
+  if (!db.positions[chatId]) db.positions[chatId] = [];
+  db.positions[chatId].push(position);
+  saveDB(db);
+}
+
+// Remove a fake position for a user (chatId) by token address
+function removeFakePosition(chatId, tokenAddress) {
+  const db = loadDB();
+  if (!db.positions[chatId]) return;
+  db.positions[chatId] = db.positions[chatId].filter(p => p.address.toLowerCase() !== tokenAddress.toLowerCase());
+  saveDB(db);
+}
+
 module.exports = {
   supabase,
   createUser,
@@ -485,5 +636,21 @@ module.exports = {
   getUserSettings,
   addTokenToWatchlist,
   removeTokenFromWatchlist,
-  getWatchlist
+  getWatchlist,
+  getFakeSTTBalance,
+  setFakeSTTBalance,
+  getFakePositions,
+  addFakePosition,
+  removeFakePositionAmount,
+  getFakeSTTBalance,
+  setFakeSTTBalance,
+  getFakePositions,
+  addFakePosition,
+  removeFakePosition,
+  initUser,
+  getUserData,
+  setUserBalance,
+  updateUserPosition,
+  loadDB,
+  saveDB
 }; 

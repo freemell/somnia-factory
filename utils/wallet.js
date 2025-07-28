@@ -72,7 +72,17 @@ async function encryptPrivateKey(privateKey) {
  */
 async function decryptPrivateKey(encryptedKey) {
   try {
+    // Check if encryptedKey is valid
+    if (!encryptedKey || typeof encryptedKey !== 'string') {
+      throw new Error('Invalid encrypted key format');
+    }
+
     const [ivHex, encrypted, authTagHex] = encryptedKey.split(':');
+    
+    // Validate the split parts
+    if (!ivHex || !encrypted || !authTagHex) {
+      throw new Error('Invalid encrypted key format - missing parts');
+    }
     
     const iv = Buffer.from(ivHex, 'hex');
     const authTag = Buffer.from(authTagHex, 'hex');
@@ -99,6 +109,12 @@ async function getWalletForUser(userId) {
     
     if (!walletData) {
       return null; // Return null instead of throwing error
+    }
+
+    // Check if private_key exists and is not undefined
+    if (!walletData.private_key) {
+      console.error(`[WALLET] No private key found for user ${userId}. Wallet data:`, walletData);
+      return null;
     }
 
     const privateKey = await decryptPrivateKey(walletData.private_key);
