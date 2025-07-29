@@ -140,7 +140,7 @@ async function executeInsomnSwap(amount, fromToken, toToken, wallet, provider) {
         
         return {
             success: true,
-            message: `✅ Swap successful!\nAmount: ${amount} ${fromToken}\nTo: ${toToken}\nTx: https://shannon-explorer.somnia.network/tx/${result.txHash}`
+            message: `✅ *Swap Successful!*\n\n💰 *Amount:* ${amount} ${fromToken}\n🎯 *To:* ${toToken}\n🔗 [Check Txn](https://shannon-explorer.somnia.network/tx/${result.txHash})`
         };
         
     } catch (error) {
