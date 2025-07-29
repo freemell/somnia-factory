@@ -1,0 +1,27 @@
+{
+  "name": "somnia-factory-bot",
+  "version": "1.0.0",
+  "description": "Factory contract for bot deployment on Somnia Testnet",
+  "main": "index.js",
+  "scripts": {
+    "compile": "hardhat compile",
+    "test": "hardhat test",
+    "deploy:factory": "hardhat run scripts/deploy/factory.js --network somnia",
+    "deploy:test-tokens": "hardhat run scripts/deploy/test-tokens.js --network somnia",
+    "test:bot": "hardhat run scripts/test-bot.js --network somnia",
+    "add:liquidity": "hardhat run scripts/add-liquidity.js --network somnia",
+    "start:bot": "node bot.js"
+  },
+  "keywords": ["somnia", "defi", "factory", "bot", "hardhat"],
+  "author": "Your Name",
+  "license": "MIT",
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^4.0.0",
+    "@openzeppelin/contracts": "^5.0.0",
+    "hardhat": "^2.19.0",
+    "dotenv": "^16.3.1"
+  },
+  "dependencies": {
+    "ethers": "^6.8.0"
+  }
+} 

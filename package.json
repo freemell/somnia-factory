@@ -9,7 +9,11 @@
     "test": "echo \"Error: no test specified\" && exit 1",
     "compile": "hardhat compile",
     "deploy:insomiacs": "hardhat run scripts/deploy-insomiacs.js --network somniaTestnet",
-    "test:insomiacs": "hardhat test test/CustomFactory.js --network somniaTestnet"
+    "test:insomiacs": "hardhat test test/CustomFactory.js --network somniaTestnet",
+    "deploy:factory": "hardhat run scripts/deploy-factory.js --network somniaTestnet",
+    "add:liquidity": "hardhat run scripts/add-liquidity-factory.js --network somniaTestnet",
+    "test:insomn": "node test-insomn-integration.js",
+    "test:swaps": "node test-real-swaps.js"
   },
   "keywords": [
     "telegram",

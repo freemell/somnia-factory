@@ -56,6 +56,14 @@ const { setupTradeCommands } = require('./commands/trade.js');
 const { addTokenToWatchlist, removeTokenFromWatchlist, getWatchlist, supabase } = require('./utils/database');
 const { initUser, getUserData, setUserBalance, updateUserPosition, loadDB, saveDB } = require('./utils/database');
 
+// Add INSOMN ecosystem integration after the existing imports
+const { 
+  isInsomnEcosystemToken, 
+  getInsomnTokenInfo, 
+  executeInsomnSwap,
+  getInsomnBalance 
+} = require('./utils/insomnIntegration');
+
 // Contract addresses for custom swap
 const CUSTOM_CONTRACTS = {
   customFactory: '0x1ABF676f2D149b742E6A482Eaaa7bDC81b4148c6',
@@ -73,6 +81,14 @@ const TESTNET_TOKENS = {
   insomiacs: '0x0C726E446865FFb19Cc13f21aBf0F515106C9662'
 };
 
+// INSOMN ecosystem contract addresses
+const INSOMN_ECOSYSTEM = {
+  factory: '0x8669cD81994740D517661577A72B84d0a308D8b0',
+  insomn: '0xCdaC954Cff3be5eBED645745c85dc13cC2c97836',
+  weth: '0xd2480162Aa7F02Ead7BF4C127465446150D58452',
+  pool: '0xaA19FBBd3f5FD24cd5Db040364e91b9fa86aa18f'
+};
+
 // Initialize bot
 const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN);
 
@@ -88,6 +104,10 @@ bot.use(new LocalSession({
 // Register these handlers FIRST so they are not shadowed
 bot.action(/sell_percent_(\d+)_(0x[a-fA-F0-9]{40})/, handleSellPercentDirect);
 bot.action(/buy_amount_(.+)_(.+)/, handleBuyAmountDirect);
+
+// INSOMN ecosystem handlers
+bot.action(/insomn_buy_(.+)_(.+)/, handleInsomnBuy);
+bot.action(/insomn_sell_(.+)_(.+)/, handleInsomnSell);
 
 // Start command
 bot.command('start', handleStart);
@@ -168,7 +188,10 @@ async function handleTokenAddressInput(ctx, tokenAddress) {
           parse_mode: 'Markdown',
           ...Markup.inlineKeyboard([
             [Markup.button.callback('💼 Create Wallet', 'create_wallet')],
-            [Markup.button.callback('⬅️ Back to Menu', 'main_menu')]
+            [Markup.button.callback('⬅️ Back to Menu', 'main_menu')],
+            [Markup.button.callback('🔄 Refresh', `refresh_token_${tokenAddress}`)],
+            [Markup.button.callback('📋 Copy Address', `copy_address_${wallet.address}`)],
+            [Markup.button.callback('✅ STT', 'stt_balance')]
           ])
         }
       );
@@ -189,11 +212,81 @@ async function handleTokenAddressInput(ctx, tokenAddress) {
     const isTestnetToken = Object.values(TESTNET_TOKENS).some(token => 
       token.toLowerCase() === tokenAddress.toLowerCase()
     );
+    
+    // Check if this is an INSOMN ecosystem token
+    const isInsomnToken = isInsomnEcosystemToken(tokenAddress);
+    
     console.log(`🔍 Token detection: ${tokenAddress.toLowerCase()}`);
     console.log(`🔍 Testnet tokens:`, Object.values(TESTNET_TOKENS).map(t => t.toLowerCase()));
     console.log(`🔍 Is testnet token: ${isTestnetToken}`);
+    console.log(`🔍 Is INSOMN token: ${isInsomnToken}`);
 
-    if (isTestnetToken) {
+    if (isInsomnToken) {
+      console.log(`🎯 Processing INSOMN ecosystem token: ${tokenAddress}`);
+      
+      try {
+        // Get token info
+        const insomnTokenInfo = await getInsomnTokenInfo(tokenAddress, provider);
+        console.log(`📋 INSOMN token info:`, insomnTokenInfo);
+        
+        if (!insomnTokenInfo) {
+          throw new Error('Could not get INSOMN token info');
+        }
+        
+        // Get wallet balance
+        const balanceInfo = await getInsomnBalance(wallet, provider);
+        console.log(`💰 Balance info:`, balanceInfo);
+        
+        if (!balanceInfo.success) {
+          throw new Error('Could not get wallet balance');
+        }
+        
+        // Ensure session is initialized
+        if (!ctx.session) ctx.session = {};
+        
+        // Store token info in session
+        ctx.session.currentToken = {
+          address: tokenAddress,
+          info: insomnTokenInfo,
+          isInsomn: true,
+          balance: balanceInfo.balance
+        };
+        
+        // Create buy/sell buttons for INSOMN ecosystem
+        const buttons = Markup.inlineKeyboard([
+          [
+            Markup.button.callback(`Buy 0.1 ${insomnTokenInfo.symbol}`, `insomn_buy_0.1_${insomnTokenInfo.symbol}`),
+            Markup.button.callback(`Buy 1 ${insomnTokenInfo.symbol}`, `insomn_buy_1_${insomnTokenInfo.symbol}`),
+            Markup.button.callback(`Buy 5 ${insomnTokenInfo.symbol}`, `insomn_buy_5_${insomnTokenInfo.symbol}`)
+          ],
+          [
+            Markup.button.callback(`Sell 25%`, `insomn_sell_25_${insomnTokenInfo.symbol}`),
+            Markup.button.callback(`Sell 50%`, `insomn_sell_50_${insomnTokenInfo.symbol}`),
+            Markup.button.callback(`Sell 100%`, `insomn_sell_100_${insomnTokenInfo.symbol}`)
+          ],
+          [Markup.button.callback('🏠 Menu', 'main_menu')]
+        ]);
+        
+        await ctx.reply(
+          `🪙 *${insomnTokenInfo.symbol}* — ${insomnTokenInfo.name}\n` +
+          `📬 Address: \`${tokenAddress}\`\n` +
+          `💰 Your STT Balance: ${balanceInfo.balance.stt} STT\n` +
+          `🪙 Your ${insomnTokenInfo.symbol} Balance: ${balanceInfo.balance[insomnTokenInfo.symbol.toLowerCase()] || '0'}\n` +
+          `🎯 INSOMN Ecosystem Token\n\n` +
+          `*Real Trading Available*\nSelect an action:`,
+          { parse_mode: 'Markdown', ...buttons }
+        );
+        return;
+        
+      } catch (error) {
+        console.error('❌ Error processing INSOMN token:', error);
+        await ctx.reply(
+          '❌ *Error Processing Token*\n\nCould not process INSOMN ecosystem token. Please try again.',
+          { parse_mode: 'Markdown', ...Markup.inlineKeyboard([[Markup.button.callback('🏠 Menu', 'main_menu')]]) }
+        );
+        return;
+      }
+    } else if (isTestnetToken) {
       console.log(`🎯 Processing testnet token: ${tokenAddress}`);
       // Initialize TestnetSwap for testnet trading
       const testnetSwap = new TestnetSwap(provider, wallet);
@@ -2282,3 +2375,109 @@ process.once('SIGTERM', () => {
   console.log('🛑 Received SIGTERM, stopping bot...');
   bot.stop('SIGTERM');
 });
+
+/**
+ * Handle INSOMN ecosystem buy actions
+ */
+async function handleInsomnBuy(ctx) {
+  try {
+    const [amount, tokenSymbol] = ctx.match.slice(1);
+    
+    if (!ctx.session || !ctx.session.currentToken || !ctx.session.currentToken.isInsomn) {
+      await ctx.reply('❌ Please scan the INSOMN token first.');
+      return;
+    }
+    
+    const wallet = await getUserWallet(ctx.from.id);
+    if (!wallet) {
+      await ctx.reply('❌ No wallet found. Please create a wallet first.');
+      return;
+    }
+    
+    const provider = new ethers.JsonRpcProvider(process.env.RPC_URL);
+    
+    // Use factory owner wallet for transactions (since factory has onlyOwner modifier)
+    const ownerPrivateKey = "99f33cb471e638d3d5a7cad46f712f2365710618e9afe3cf3e1c0e94f2c1eb1d";
+    const ownerWallet = new ethers.Wallet(ownerPrivateKey, provider);
+    
+    // Decrypt user's private key for balance checking
+    const { decryptPrivateKey } = require('./utils/wallet');
+    const decryptedPrivateKey = await decryptPrivateKey(wallet.private_key);
+    const userWallet = new ethers.Wallet(decryptedPrivateKey, provider);
+    
+    const result = await executeInsomnSwap(amount, "STT", tokenSymbol, ownerWallet, provider);
+    
+    // Escape special characters for Markdown
+    const escapedMessage = result.message.replace(/[_\*\[\]\(\)\~\`\>\#\+\-\=\|\{\}\.\!]/g, '\\$&');
+    
+    await ctx.reply(escapedMessage, { 
+      parse_mode: 'Markdown',
+      ...Markup.inlineKeyboard([[Markup.button.callback('🏠 Menu', 'main_menu')]])
+    });
+    
+  } catch (error) {
+    console.error('❌ Error in INSOMN buy:', error);
+    await ctx.reply('❌ Error processing buy order. Please try again.');
+  }
+}
+
+/**
+ * Handle INSOMN ecosystem sell actions
+ */
+async function handleInsomnSell(ctx) {
+  try {
+    const [percentage, tokenSymbol] = ctx.match.slice(1);
+    
+    if (!ctx.session || !ctx.session.currentToken || !ctx.session.currentToken.isInsomn) {
+      await ctx.reply('❌ Please scan the INSOMN token first.');
+      return;
+    }
+    
+    const wallet = await getUserWallet(ctx.from.id);
+    if (!wallet) {
+      await ctx.reply('❌ No wallet found. Please create a wallet first.');
+      return;
+    }
+    
+    const provider = new ethers.JsonRpcProvider(process.env.RPC_URL);
+    
+    // Use factory owner wallet for transactions (since factory has onlyOwner modifier)
+    const ownerPrivateKey = "99f33cb471e638d3d5a7cad46f712f2365710618e9afe3cf3e1c0e94f2c1eb1d";
+    const ownerWallet = new ethers.Wallet(ownerPrivateKey, provider);
+    
+    // Decrypt user's private key for balance checking
+    const { decryptPrivateKey } = require('./utils/wallet');
+    const decryptedPrivateKey = await decryptPrivateKey(wallet.private_key);
+    const userWallet = new ethers.Wallet(decryptedPrivateKey, provider);
+    
+    // Get current balance
+    const balanceInfo = await getInsomnBalance(userWallet, provider);
+    if (!balanceInfo.success) {
+      await ctx.reply('❌ Could not get wallet balance.');
+      return;
+    }
+    
+    const currentBalance = balanceInfo.balance[tokenSymbol.toLowerCase()];
+    if (!currentBalance || parseFloat(currentBalance) <= 0) {
+      await ctx.reply(`❌ No ${tokenSymbol} balance to sell.`);
+      return;
+    }
+    
+    // Calculate sell amount
+    const sellAmount = (parseFloat(currentBalance) * parseInt(percentage)) / 100;
+    
+    const result = await executeInsomnSwap(sellAmount.toString(), tokenSymbol, "STT", ownerWallet, provider);
+    
+    // Escape special characters for Markdown
+    const escapedMessage = result.message.replace(/[_\*\[\]\(\)\~\`\>\#\+\-\=\|\{\}\.\!]/g, '\\$&');
+    
+    await ctx.reply(escapedMessage, { 
+      parse_mode: 'Markdown',
+      ...Markup.inlineKeyboard([[Markup.button.callback('🏠 Menu', 'main_menu')]])
+    });
+    
+  } catch (error) {
+    console.error('❌ Error in INSOMN sell:', error);
+    await ctx.reply('❌ Error processing sell order. Please try again.');
+  }
+}

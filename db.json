@@ -43,12 +43,31 @@
   },
   "6667190190": {
     "balance": {
-      "stt": -6,
+      "stt": -7,
       "insom": 0
     },
     "positions": {
       "insom": 10,
-      "ping": 0.5
+      "ping": 0.5,
+      "insomn": 2
+    }
+  },
+  "5408215415": {
+    "balance": {
+      "stt": -1,
+      "insom": 0
+    },
+    "positions": {
+      "insom": 2
+    }
+  },
+  "6511283176": {
+    "balance": {
+      "stt": -0.2,
+      "insom": 0
+    },
+    "positions": {
+      "insom": 0.4
     }
   }
 }
