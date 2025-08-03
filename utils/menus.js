@@ -47,10 +47,8 @@ async function showMainMenu(ctx) {
 
     // Create custom buttons with copy address functionality
     const customButtons = [
-      [
-        Markup.button.callback('📋 Copy Address', `copy_address_${wallet.address}`),
-        Markup.button.callback('🔄 Refresh', 'refresh')
-      ],
+      [Markup.button.callback('🔄 Refresh', 'refresh')],
+      [Markup.button.callback('📊 Positions', 'positions')],
       ...mainMenuButtons.slice(1) // Add the rest of the main menu buttons
     ];
 

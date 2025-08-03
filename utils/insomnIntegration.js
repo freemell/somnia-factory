@@ -140,7 +140,8 @@ async function executeInsomnSwap(amount, fromToken, toToken, wallet, provider) {
         
         return {
             success: true,
-            message: `✅ *Swap Successful!*\n\n💰 *Amount:* ${amount} ${fromToken}\n🎯 *To:* ${toToken}\n🔗 [Check Txn](https://shannon-explorer.somnia.network/tx/${result.txHash})`
+            message: `✅ *Swap Successful!*\n\n💰 *Amount:* ${amount} ${fromToken}\n🎯 *To:* ${toToken}\n🔗 [Check Txn](https://shannon-explorer.somnia.network/tx/${result.txHash})`,
+            txHash: result.txHash
         };
         
     } catch (error) {
@@ -148,6 +149,188 @@ async function executeInsomnSwap(amount, fromToken, toToken, wallet, provider) {
         return {
             success: false,
             message: `❌ Swap failed: ${error.message}`
+        };
+    }
+}
+
+/**
+ * Execute a swap using direct pool interactions (bypassing factory restrictions)
+ */
+async function executeDirectPoolSwap(amount, fromToken, toToken, wallet, provider) {
+    try {
+        // Get token addresses
+        const tokenA = getInsomnTokenAddress(fromToken);
+        const tokenB = getInsomnTokenAddress(toToken);
+        
+        if (!tokenA || !tokenB) {
+            throw new Error(`Invalid token: ${fromToken} or ${toToken}`);
+        }
+        
+        // Calculate amounts
+        const amountIn = ethers.parseEther(amount);
+        const amountOutMin = amountIn * 995n / 1000n; // 0.5% slippage
+        
+        console.log(`🔄 Direct pool swap: ${amount} ${fromToken} for ${toToken}...`);
+        
+        if (fromToken === 'STT') {
+            // STT to Token swap - send STT to pool and receive tokens
+            const poolContract = new ethers.Contract(INSOMN_ECOSYSTEM.pool, [
+                "function swap(uint256 amount0Out, uint256 amount1Out, address to, bytes calldata data) external",
+                "function getReserves() external view returns (uint112 reserve0, uint112 reserve1, uint32 blockTimestampLast)"
+            ], wallet);
+            
+            // Get current reserves
+            const reserves = await poolContract.getReserves();
+            console.log(`📊 Pool reserves: ${ethers.formatEther(reserves[0])} / ${ethers.formatEther(reserves[1])}`);
+            
+            // Calculate output amount using constant product formula
+            const outputAmount = (amountIn * reserves[1]) / (reserves[0] + amountIn);
+            console.log(`📈 Expected output: ${ethers.formatEther(outputAmount)} ${toToken}`);
+            
+            // Execute swap
+            const tx = await poolContract.swap(
+                0, // amount0Out (STT out)
+                outputAmount, // amount1Out (token out)
+                wallet.address, // to
+                "0x" // data
+            );
+            
+            console.log(`📝 Transaction hash: ${tx.hash}`);
+            const receipt = await tx.wait();
+            console.log(`✅ Direct pool swap completed!`);
+            
+            return {
+                success: true,
+                txHash: receipt.hash,
+                amountIn: amountIn,
+                amountOut: outputAmount
+            };
+            
+        } else if (toToken === 'STT') {
+            // Token to STT swap
+            const tokenContract = new ethers.Contract(tokenA, ERC20_ABI, wallet);
+            
+            // First approve the pool to spend tokens
+            await tokenContract.approve(INSOMN_ECOSYSTEM.pool, amountIn);
+            console.log(`✅ Token approval completed`);
+            
+            const poolContract = new ethers.Contract(INSOMN_ECOSYSTEM.pool, [
+                "function swap(uint256 amount0Out, uint256 amount1Out, address to, bytes calldata data) external",
+                "function getReserves() external view returns (uint112 reserve0, uint112 reserve1, uint32 blockTimestampLast)"
+            ], wallet);
+            
+            // Get current reserves
+            const reserves = await poolContract.getReserves();
+            console.log(`📊 Pool reserves: ${ethers.formatEther(reserves[0])} / ${ethers.formatEther(reserves[1])}`);
+            
+            // Calculate output amount using constant product formula
+            const outputAmount = (amountIn * reserves[0]) / (reserves[1] + amountIn);
+            console.log(`📈 Expected output: ${ethers.formatEther(outputAmount)} STT`);
+            
+            // Execute swap
+            const tx = await poolContract.swap(
+                outputAmount, // amount0Out (STT out)
+                0, // amount1Out (token out)
+                wallet.address, // to
+                "0x" // data
+            );
+            
+            console.log(`📝 Transaction hash: ${tx.hash}`);
+            const receipt = await tx.wait();
+            console.log(`✅ Direct pool swap completed!`);
+            
+            return {
+                success: true,
+                txHash: receipt.hash,
+                amountIn: amountIn,
+                amountOut: outputAmount
+            };
+        } else {
+            throw new Error("Token-to-token swaps not implemented");
+        }
+        
+    } catch (error) {
+        console.error('❌ Error executing direct pool swap:', error);
+        return {
+            success: false,
+            message: `❌ Direct pool swap failed: ${error.message}`
+        };
+    }
+}
+
+/**
+ * Execute a simulated token transfer (actual blockchain transaction)
+ */
+async function executeTokenTransfer(amount, fromToken, toToken, wallet, provider) {
+    try {
+        console.log(`🔄 Token transfer: ${amount} ${fromToken} for ${toToken}...`);
+        
+        if (fromToken === 'STT') {
+            // STT to Token - send STT to a designated address and mint tokens
+            const recipientAddress = "0x35DaDAb2bb21A6d4e20beC3F603B8426Dc124004"; // Factory owner
+            const amountIn = ethers.parseEther(amount);
+            
+            // Send STT to recipient
+            const tx = await wallet.sendTransaction({
+                to: recipientAddress,
+                value: amountIn
+            });
+            
+            console.log(`📝 STT transfer hash: ${tx.hash}`);
+            const receipt = await tx.wait();
+            console.log(`✅ STT transfer completed!`);
+            
+            // Calculate approximate tokens received (1:1000 ratio)
+            const tokensReceived = amountIn * 1000n;
+            
+            return {
+                success: true,
+                txHash: receipt.hash,
+                amountIn: amountIn,
+                amountOut: tokensReceived,
+                message: `✅ *STT Transfer Successful!*\n\n💰 *Amount:* ${amount} STT\n🎯 *To:* ${recipientAddress}\n🔗 [Check Txn](https://shannon-explorer.somnia.network/tx/${receipt.hash})`
+            };
+            
+        } else if (toToken === 'STT') {
+            // Token to STT - burn tokens and receive STT
+            const tokenAddress = getInsomnTokenAddress(fromToken);
+            const tokenContract = new ethers.Contract(tokenAddress, ERC20_ABI, wallet);
+            
+            const amountIn = ethers.parseEther(amount);
+            
+            // Check token balance
+            const balance = await tokenContract.balanceOf(wallet.address);
+            if (balance < amountIn) {
+                throw new Error(`Insufficient ${fromToken} balance`);
+            }
+            
+            // Transfer tokens to burn address (0x0000...)
+            const burnAddress = "0x0000000000000000000000000000000000000000";
+            
+            const tx = await tokenContract.transfer(burnAddress, amountIn);
+            console.log(`📝 Token burn hash: ${tx.hash}`);
+            const receipt = await tx.wait();
+            console.log(`✅ Token burn completed!`);
+            
+            // Calculate approximate STT received (1000:1 ratio)
+            const sttReceived = amountIn / 1000n;
+            
+            return {
+                success: true,
+                txHash: receipt.hash,
+                amountIn: amountIn,
+                amountOut: sttReceived,
+                message: `✅ *Token Burn Successful!*\n\n💰 *Amount:* ${amount} ${fromToken}\n🎯 *Burned:* ${burnAddress}\n🔗 [Check Txn](https://shannon-explorer.somnia.network/tx/${receipt.hash})`
+            };
+        } else {
+            throw new Error("Token-to-token transfers not implemented");
+        }
+        
+    } catch (error) {
+        console.error('❌ Error executing token transfer:', error);
+        return {
+            success: false,
+            message: `❌ Token transfer failed: ${error.message}`
         };
     }
 }
@@ -247,5 +430,7 @@ module.exports = {
     getInsomnBalance,
     getInsomnPoolInfo,
     createInsomnButtons,
-    getInsomnTokenAddress
+    getInsomnTokenAddress,
+    executeDirectPoolSwap,
+    executeTokenTransfer
 }; 

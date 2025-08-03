@@ -1,4 +1,5 @@
 const { createClient } = require('@supabase/supabase-js');
+const { ethers } = require('ethers');
 const fs = require('fs');
 const path = require('path');
 
@@ -111,6 +112,10 @@ async function getUser(userId) {
 // Wallet management
 async function createWallet(userId, address, privateKey) {
   try {
+    console.log(`[DB] Creating wallet for user ${userId}`);
+    console.log(`[DB] Encrypted key length: ${privateKey.length}`);
+    console.log(`[DB] Encrypted key format: ${privateKey.substring(0, 50)}...`);
+    
     const { data, error } = await supabase
       .from('wallets')
       .insert({
@@ -159,6 +164,12 @@ async function getWallet(userId) {
       throw error;
     }
     console.log(`[DB] Supabase data for user_id ${userId}:`, data ? `Wallet found with address ${data.address}` : 'No data');
+    
+    if (data && data.private_key) {
+      console.log(`[DB] Retrieved encrypted key length: ${data.private_key.length}`);
+      console.log(`[DB] Retrieved encrypted key format: ${data.private_key.substring(0, 50)}...`);
+    }
+    
     return data;
   } catch (error) {
     console.error(`[DB] Outer catch error in getWallet for user_id ${userId}:`, error);
@@ -616,6 +627,297 @@ function removeFakePosition(chatId, tokenAddress) {
   saveDB(db);
 }
 
+// --- POSITIONS MANAGEMENT ---
+
+// Save a trade to the database
+async function saveUserTrade(userId, tradeData) {
+  try {
+    // Validate token address before saving
+    
+    // Validate token address if provided
+    if (tradeData.tokenAddress && !ethers.isAddress(tradeData.tokenAddress)) {
+      console.error('Invalid token address provided:', tradeData.tokenAddress);
+      throw new Error('Invalid token address format');
+    }
+    
+    // Ensure we have valid token data
+    const tokenIn = tradeData.type === 'buy' ? 'STT' : tradeData.tokenSymbol;
+    const tokenOut = tradeData.type === 'buy' ? tradeData.tokenSymbol : 'STT';
+    
+    // For non-STT tokens, ensure we have a valid address
+    const tokenInAddress = tokenIn === 'STT' ? null : tradeData.tokenAddress;
+    const tokenOutAddress = tokenOut === 'STT' ? null : tradeData.tokenAddress;
+    
+    console.log('🔍 [DEBUG] saveUserTrade - Trade data:', {
+      userId,
+      tokenIn,
+      tokenOut,
+      tokenInAddress,
+      tokenOutAddress,
+      type: tradeData.type
+    });
+    
+    const { data, error } = await supabase
+      .from('trades')
+      .insert({
+        user_id: userId,
+        token_in: tokenIn,
+        token_out: tokenOut,
+        token_in_address: tokenInAddress,
+        token_out_address: tokenOutAddress,
+        amount_in: tradeData.type === 'buy' ? tradeData.sttAmount.toString() : tradeData.amount.toString(),
+        amount_out: tradeData.type === 'buy' ? tradeData.amount.toString() : tradeData.sttAmount.toString(),
+        tx_hash: tradeData.txHash,
+        type: tradeData.type, // 'buy' or 'sell'
+        created_at: new Date().toISOString()
+      })
+      .select()
+      .single();
+
+    if (error) {
+      console.error('Error saving trade:', error);
+      return null;
+    }
+    return data;
+  } catch (error) {
+    console.error('Error saving trade:', error);
+    return null;
+  }
+}
+
+// Get user's positions (all tokens they own)
+async function getUserPositions(userId) {
+  try {
+    const { data, error } = await supabase
+      .from('trades')
+      .select('*')
+      .eq('user_id', userId)
+      .order('created_at', { ascending: false });
+
+    if (error) {
+      console.error('Error getting positions:', error);
+      return [];
+    }
+
+    console.log('🔍 [DEBUG] getUserPositions - Raw trades data:', data);
+
+    // Group by token and calculate net positions
+    const positions = {};
+    data.forEach(trade => {
+      // For buy trades: token_out is the token we're buying
+      // For sell trades: token_in is the token we're selling
+      const tokenSymbol = trade.type === 'buy' ? trade.token_out : trade.token_in;
+      const tokenAddress = trade.type === 'buy' ? trade.token_out_address : trade.token_in_address;
+      
+      console.log('🔍 [DEBUG] getUserPositions - Processing trade:', {
+        type: trade.type,
+        tokenSymbol,
+        tokenAddress,
+        token_out: trade.token_out,
+        token_in: trade.token_in,
+        token_out_address: trade.token_out_address,
+        token_in_address: trade.token_in_address
+      });
+      
+      // Skip if we don't have a valid token symbol or address
+      if (!tokenSymbol || tokenSymbol === 'STT') {
+        console.log('🔍 [DEBUG] getUserPositions - Skipping STT or invalid token');
+        return;
+      }
+      
+      // Use token address as key if available, otherwise use symbol
+      const positionKey = tokenAddress || tokenSymbol;
+      
+      if (!positions[positionKey]) {
+        positions[positionKey] = {
+          tokenAddress: tokenAddress,
+          tokenSymbol: tokenSymbol,
+          amount: 0,
+          totalBought: 0,
+          totalSold: 0,
+          lastTrade: trade.created_at
+        };
+      }
+      
+      if (trade.type === 'buy') {
+        const amount = parseFloat(trade.amount_out);
+        positions[positionKey].amount += amount;
+        positions[positionKey].totalBought += amount;
+      } else if (trade.type === 'sell') {
+        const amount = parseFloat(trade.amount_in);
+        positions[positionKey].amount -= amount;
+        positions[positionKey].totalSold += amount;
+      }
+    });
+
+    console.log('🔍 [DEBUG] getUserPositions - Calculated positions:', positions);
+
+    // Filter out zero or negative positions and validate addresses
+    const validPositions = Object.values(positions).filter(pos => {
+      if (pos.amount <= 0) {
+        console.log('🔍 [DEBUG] getUserPositions - Filtering out zero/negative position:', pos);
+        return false;
+      }
+      
+      // Validate token address if present
+      if (pos.tokenAddress && !ethers.isAddress(pos.tokenAddress)) {
+        console.log('🔍 [DEBUG] getUserPositions - Filtering out invalid address:', pos.tokenAddress);
+        return false;
+      }
+      
+      return true;
+    });
+
+    console.log('🔍 [DEBUG] getUserPositions - Final valid positions:', validPositions);
+    return validPositions;
+  } catch (error) {
+    console.error('Error getting positions:', error);
+    return [];
+  }
+}
+
+// Track user positions for testnet tokens
+async function updateUserPosition(userId, positionData) {
+  try {
+    const { tokenAddress, tokenSymbol, amount, type } = positionData;
+    
+    // Get current position
+    const { data: existingPosition } = await supabase
+      .from('user_positions')
+      .select('*')
+      .eq('user_id', userId)
+      .eq('token_address', tokenAddress)
+      .single();
+    
+    if (existingPosition) {
+      // Update existing position
+      const newAmount = type === 'buy' 
+        ? existingPosition.amount + amount 
+        : existingPosition.amount - amount;
+      
+      await supabase
+        .from('user_positions')
+        .update({ 
+          amount: Math.max(0, newAmount), // Don't go below 0
+          updated_at: new Date().toISOString()
+        })
+        .eq('user_id', userId)
+        .eq('token_address', tokenAddress);
+    } else if (type === 'buy') {
+      // Create new position
+      await supabase
+        .from('user_positions')
+        .insert({
+          user_id: userId,
+          token_address: tokenAddress,
+          token_symbol: tokenSymbol,
+          amount: amount,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString()
+        });
+    }
+    
+    return true;
+  } catch (error) {
+    console.error('Error updating user position:', error);
+    return false;
+  }
+}
+
+// Get user position for a specific token
+async function getUserPosition(userId, tokenAddress) {
+  try {
+    console.log(`🔍 [DEBUG] getUserPosition - User ID: ${userId}, Token Address: ${tokenAddress}`);
+    
+    // Get all trades for this user
+    const { data: trades, error } = await supabase
+      .from('trades')
+      .select('*')
+      .eq('user_id', userId)
+      .order('created_at', { ascending: false });
+
+    if (error) {
+      console.error('Error getting trades for position calculation:', error);
+      return null;
+    }
+
+    console.log(`🔍 [DEBUG] getUserPosition - Found ${trades?.length || 0} trades`);
+
+    let totalBought = 0;
+    let totalSold = 0;
+    let tokenSymbol = 'UNKNOWN';
+    let lastTrade = null;
+
+    // Calculate position from trades
+    for (const trade of trades || []) {
+      // Check if this trade involves the target token
+      const isTokenIn = trade.token_in_address === tokenAddress;
+      const isTokenOut = trade.token_out_address === tokenAddress;
+      
+      if (isTokenIn || isTokenOut) {
+        if (lastTrade === null) {
+          lastTrade = trade.created_at;
+        }
+        
+        if (isTokenIn && trade.type === 'sell') {
+          // User sold this token
+          totalSold += parseFloat(trade.amount_in || 0);
+          tokenSymbol = trade.token_in;
+        } else if (isTokenOut && trade.type === 'buy') {
+          // User bought this token
+          totalBought += parseFloat(trade.amount_out || 0);
+          tokenSymbol = trade.token_out;
+        }
+      }
+    }
+
+    const amount = totalBought - totalSold;
+    
+    console.log(`🔍 [DEBUG] getUserPosition - Calculated position:`, {
+      tokenAddress,
+      tokenSymbol,
+      amount,
+      totalBought,
+      totalSold,
+      lastTrade
+    });
+
+    return {
+      tokenAddress: tokenAddress,
+      tokenSymbol: tokenSymbol,
+      amount: amount,
+      totalBought: totalBought,
+      totalSold: totalSold,
+      lastTrade: lastTrade
+    };
+  } catch (error) {
+    console.error('Error getting user position:', error);
+    return null;
+  }
+}
+
+// Update user's fake balance (for testnet trading)
+async function updateUserFakeBalance(userId, sttBalance) {
+  try {
+    const settings = await getUserSettings(userId) || {};
+    settings.fake_stt_balance = sttBalance;
+    await saveUserSettings(userId, settings);
+  } catch (error) {
+    console.error('Error updating fake balance:', error);
+  }
+}
+
+// Get user's fake balance (for testnet trading)
+async function getUserFakeBalance(userId) {
+  try {
+    const settings = await getUserSettings(userId);
+    return settings?.fake_stt_balance || 1000; // Default 1000 STT
+  } catch (error) {
+    console.error('Error getting fake balance:', error);
+    return 1000;
+  }
+}
+
 module.exports = {
   supabase,
   createUser,
@@ -652,5 +954,10 @@ module.exports = {
   setUserBalance,
   updateUserPosition,
   loadDB,
-  saveDB
+  saveDB,
+  saveUserTrade,
+  getUserPositions,
+  getUserPosition,
+  updateUserFakeBalance,
+  getUserFakeBalance
 }; 

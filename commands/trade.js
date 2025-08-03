@@ -154,6 +154,17 @@ async function handleAmountSelection(ctx) {
     const amountIn = ethers.parseUnits(amount, tokenInfo.decimals);
     const WSTT = process.env.WETH_ADDRESS;
     const path = action === 'buy' ? [WSTT, tokenAddress] : [tokenAddress, WSTT];
+    
+    console.log('🔍 [DEBUG] trade.js - Action:', action);
+    console.log('🔍 [DEBUG] trade.js - Token address:', tokenAddress);
+    console.log('🔍 [DEBUG] trade.js - Amount:', amount);
+    console.log('🔍 [DEBUG] trade.js - WSTT address:', WSTT);
+    console.log('🔍 [DEBUG] trade.js - Path:', path);
+    console.log('🔍 [DEBUG] trade.js - Path[0]:', path[0]);
+    console.log('🔍 [DEBUG] trade.js - Path[1]:', path[1]);
+    console.log('🔍 [DEBUG] trade.js - Path[0] isAddress:', ethers.isAddress(path[0]));
+    console.log('🔍 [DEBUG] trade.js - Path[1] isAddress:', ethers.isAddress(path[1]));
+    
     try {
       const amountOut = await getAmountsOut(amountIn, path);
       const amountOutMin = calculateAmountOutMin(amountOut, 1); // 1% slippage
@@ -241,6 +252,17 @@ async function handleTradeConfirmation(ctx) {
     const amountIn = ethers.parseUnits(amount, tokenInfo.decimals);
     const WSTT = process.env.WETH_ADDRESS;
     const path = action === 'buy' ? [WSTT, tokenAddress] : [tokenAddress, WSTT];
+    
+    console.log('🔍 [DEBUG] handleTradeConfirmation - Action:', action);
+    console.log('🔍 [DEBUG] handleTradeConfirmation - Token address:', tokenAddress);
+    console.log('🔍 [DEBUG] handleTradeConfirmation - Amount:', amount);
+    console.log('🔍 [DEBUG] handleTradeConfirmation - WSTT address:', WSTT);
+    console.log('🔍 [DEBUG] handleTradeConfirmation - Path:', path);
+    console.log('🔍 [DEBUG] handleTradeConfirmation - Path[0]:', path[0]);
+    console.log('🔍 [DEBUG] handleTradeConfirmation - Path[1]:', path[1]);
+    console.log('🔍 [DEBUG] handleTradeConfirmation - Path[0] isAddress:', ethers.isAddress(path[0]));
+    console.log('🔍 [DEBUG] handleTradeConfirmation - Path[1] isAddress:', ethers.isAddress(path[1]));
+    
     let amountOut, amountOutMin, result;
     try {
       amountOut = await getAmountsOut(amountIn, path);

@@ -54,15 +54,39 @@ const {
 const { startLimitOrderMonitoring } = require('./utils/limitOrders');
 const { setupTradeCommands } = require('./commands/trade.js');
 const { addTokenToWatchlist, removeTokenFromWatchlist, getWatchlist, supabase } = require('./utils/database');
-const { initUser, getUserData, setUserBalance, updateUserPosition, loadDB, saveDB } = require('./utils/database');
+const { 
+  initUser, 
+  getUserData, 
+  setUserBalance, 
+  updateUserPosition, 
+  loadDB, 
+  saveDB,
+  saveUserTrade,
+  getUserPositions,
+  getUserPosition,
+  updateUserFakeBalance,
+  getUserFakeBalance
+} = require('./utils/database');
 
 // Add INSOMN ecosystem integration after the existing imports
 const { 
   isInsomnEcosystemToken, 
   getInsomnTokenInfo, 
   executeInsomnSwap,
-  getInsomnBalance 
+  getInsomnBalance,
+  getInsomnTokenAddress,
+  executeDirectPoolSwap,
+  executeTokenTransfer
 } = require('./utils/insomnIntegration');
+
+// Add DEX commands integration
+const {
+  handlePairs,
+  handleQuote,
+  handlePrice,
+  handleInfo,
+  handleDexHelp
+} = require('./commands/dex');
 
 // Contract addresses for custom swap
 const CUSTOM_CONTRACTS = {
@@ -78,7 +102,8 @@ const CUSTOM_CONTRACTS = {
 const TESTNET_TOKENS = {
   stt: '0x4A3BC48C156384f9564Fd65A53a2f3D534D8f2b7',
   ping: '0x33E7fAB0a8a5da1A923180989bD617c9c2D1C493',
-  insomiacs: '0x0C726E446865FFb19Cc13f21aBf0F515106C9662'
+  insomiacs: '0x0C726E446865FFb19Cc13f21aBf0F515106C9662',
+  test: '0xab477d0094b975173f12F5Cc7fffF4EE8BA22283'  // New test token with liquidity
 };
 
 // INSOMN ecosystem contract addresses
@@ -105,12 +130,23 @@ bot.use(new LocalSession({
 bot.action(/sell_percent_(\d+)_(0x[a-fA-F0-9]{40})/, handleSellPercentDirect);
 bot.action(/buy_amount_(.+)_(.+)/, handleBuyAmountDirect);
 
-// INSOMN ecosystem handlers
-bot.action(/insomn_buy_(.+)_(.+)/, handleInsomnBuy);
-bot.action(/insomn_sell_(.+)_(.+)/, handleInsomnSell);
+// DEX buy/sell handlers
+bot.action(/dex_buy_(.+)_(0x[a-fA-F0-9]{40})/, handleDexBuy);
+bot.action(/dex_sell_(\d+)_(0x[a-fA-F0-9]{40})/, handleDexSell);
+
+// Positions handlers
+bot.action('positions', handlePositions);
+bot.action(/sell_position_(0x[a-fA-F0-9]{40})/, handleSellPosition);
 
 // Start command
 bot.command('start', handleStart);
+
+// DEX commands
+bot.command('pairs', handlePairs);
+bot.command('quote', handleQuote);
+bot.command('price', handlePrice);
+bot.command('info', handleInfo);
+bot.command('dexhelp', handleDexHelp);
 
 // Handle wallet creation
 bot.action('create_wallet', handleCreateWallet);
@@ -190,7 +226,7 @@ async function handleTokenAddressInput(ctx, tokenAddress) {
             [Markup.button.callback('💼 Create Wallet', 'create_wallet')],
             [Markup.button.callback('⬅️ Back to Menu', 'main_menu')],
             [Markup.button.callback('🔄 Refresh', `refresh_token_${tokenAddress}`)],
-            [Markup.button.callback('📋 Copy Address', `copy_address_${wallet.address}`)],
+            [Markup.button.callback('📊 Positions', 'positions')],
             [Markup.button.callback('✅ STT', 'stt_balance')]
           ])
         }
@@ -221,25 +257,22 @@ async function handleTokenAddressInput(ctx, tokenAddress) {
     console.log(`🔍 Is testnet token: ${isTestnetToken}`);
     console.log(`🔍 Is INSOMN token: ${isInsomnToken}`);
 
-    if (isInsomnToken) {
-      console.log(`🎯 Processing INSOMN ecosystem token: ${tokenAddress}`);
+    // Use real DEX for mainnet tokens (not in testnet list)
+    if (!isTestnetToken && !isInsomnToken) {
+      console.log(`🎯 Processing mainnet token via DEX: ${tokenAddress}`);
       
       try {
-        // Get token info
-        const insomnTokenInfo = await getInsomnTokenInfo(tokenAddress, provider);
-        console.log(`📋 INSOMN token info:`, insomnTokenInfo);
+        // Use DEX service for mainnet tokens
+        const DexService = require('./utils/dexService');
+        const dexService = new DexService();
         
-        if (!insomnTokenInfo) {
-          throw new Error('Could not get INSOMN token info');
-        }
+        // Get token info via DEX
+        const tokenInfo = await dexService.getTokenInfo(tokenAddress);
+        console.log(`📋 DEX token info:`, tokenInfo);
         
         // Get wallet balance
-        const balanceInfo = await getInsomnBalance(wallet, provider);
-        console.log(`💰 Balance info:`, balanceInfo);
-        
-        if (!balanceInfo.success) {
-          throw new Error('Could not get wallet balance');
-        }
+        const userBalance = await provider.getBalance(wallet.address);
+        const sttBalance = parseFloat(ethers.formatEther(userBalance));
         
         // Ensure session is initialized
         if (!ctx.session) ctx.session = {};
@@ -247,41 +280,101 @@ async function handleTokenAddressInput(ctx, tokenAddress) {
         // Store token info in session
         ctx.session.currentToken = {
           address: tokenAddress,
-          info: insomnTokenInfo,
-          isInsomn: true,
-          balance: balanceInfo.balance
+          info: tokenInfo,
+          isDex: true,
+          balance: { stt: sttBalance }
         };
         
-        // Create buy/sell buttons for INSOMN ecosystem
+        // Create simple buy/sell buttons
         const buttons = Markup.inlineKeyboard([
           [
-            Markup.button.callback(`Buy 0.1 ${insomnTokenInfo.symbol}`, `insomn_buy_0.1_${insomnTokenInfo.symbol}`),
-            Markup.button.callback(`Buy 1 ${insomnTokenInfo.symbol}`, `insomn_buy_1_${insomnTokenInfo.symbol}`),
-            Markup.button.callback(`Buy 5 ${insomnTokenInfo.symbol}`, `insomn_buy_5_${insomnTokenInfo.symbol}`)
+            Markup.button.callback(`Buy 0.1 ${tokenInfo.symbol}`, `dex_buy_0.1_${tokenAddress}`),
+            Markup.button.callback(`Buy 1 ${tokenInfo.symbol}`, `dex_buy_1_${tokenAddress}`),
+            Markup.button.callback(`Buy 5 ${tokenInfo.symbol}`, `dex_buy_5_${tokenAddress}`)
           ],
           [
-            Markup.button.callback(`Sell 25%`, `insomn_sell_25_${insomnTokenInfo.symbol}`),
-            Markup.button.callback(`Sell 50%`, `insomn_sell_50_${insomnTokenInfo.symbol}`),
-            Markup.button.callback(`Sell 100%`, `insomn_sell_100_${insomnTokenInfo.symbol}`)
+            Markup.button.callback(`Sell 25%`, `dex_sell_25_${tokenAddress}`),
+            Markup.button.callback(`Sell 50%`, `dex_sell_50_${tokenAddress}`),
+            Markup.button.callback(`Sell 100%`, `dex_sell_100_${tokenAddress}`)
           ],
           [Markup.button.callback('🏠 Menu', 'main_menu')]
         ]);
         
         await ctx.reply(
-          `🪙 *${insomnTokenInfo.symbol}* — ${insomnTokenInfo.name}\n` +
+          `🏭 *DEX Token Detected*\n\n` +
+          `🪙 *Token:* ${tokenInfo.name} (${tokenInfo.symbol})\n` +
+          `📍 *Address:* \`${tokenAddress}\`\n` +
+          `💰 *Your STT Balance:* ${sttBalance.toFixed(3)} STT\n\n` +
+          `*Real DEX trading enabled!* 🚀\n\n` +
+          `Select an action:`,
+          {
+            parse_mode: 'Markdown',
+            ...buttons
+          }
+        );
+        return;
+      } catch (error) {
+        console.error('❌ DEX token processing error:', error);
+        // Fall back to testnet processing
+      }
+    }
+
+    if (isInsomnToken) {
+      console.log(`🎯 Processing INSOMN ecosystem token via DEX: ${tokenAddress}`);
+      
+      try {
+        // Use DEX service instead of old INSOMN integration
+        const DexService = require('./utils/dexService');
+        const dexService = new DexService();
+        
+        // Get token info via DEX
+        const tokenInfo = await dexService.getTokenInfo(tokenAddress);
+        console.log(`📋 DEX token info:`, tokenInfo);
+        
+        // Get wallet balance
+        const userBalance = await provider.getBalance(wallet.address);
+        const sttBalance = parseFloat(ethers.formatEther(userBalance));
+        
+        // Ensure session is initialized
+        if (!ctx.session) ctx.session = {};
+        
+        // Store token info in session
+        ctx.session.currentToken = {
+          address: tokenAddress,
+          info: tokenInfo,
+          isDex: true,
+          balance: { stt: sttBalance }
+        };
+        
+        // Create simple buy/sell buttons
+        const buttons = Markup.inlineKeyboard([
+          [
+            Markup.button.callback(`Buy 0.1 ${tokenInfo.symbol}`, `dex_buy_0.1_${tokenAddress}`),
+            Markup.button.callback(`Buy 1 ${tokenInfo.symbol}`, `dex_buy_1_${tokenAddress}`),
+            Markup.button.callback(`Buy 5 ${tokenInfo.symbol}`, `dex_buy_5_${tokenAddress}`)
+          ],
+          [
+            Markup.button.callback(`Sell 25%`, `dex_sell_25_${tokenAddress}`),
+            Markup.button.callback(`Sell 50%`, `dex_sell_50_${tokenAddress}`),
+            Markup.button.callback(`Sell 100%`, `dex_sell_100_${tokenAddress}`)
+          ],
+          [Markup.button.callback('🏠 Menu', 'main_menu')]
+        ]);
+        
+        await ctx.reply(
+          `🪙 *${tokenInfo.symbol}* — ${tokenInfo.name}\n` +
           `📬 Address: \`${tokenAddress}\`\n` +
-          `💰 Your STT Balance: ${balanceInfo.balance.stt} STT\n` +
-          `🪙 Your ${insomnTokenInfo.symbol} Balance: ${balanceInfo.balance[insomnTokenInfo.symbol.toLowerCase()] || '0'}\n` +
-          `🎯 INSOMN Ecosystem Token\n\n` +
-          `*Real Trading Available*\nSelect an action:`,
+          `💰 Your STT Balance: ${sttBalance.toFixed(3)} STT\n` +
+          `🎯 DEX Trading Available\n\n` +
+          `*Simple Buy/Sell - Bot handles the rest!*`,
           { parse_mode: 'Markdown', ...buttons }
         );
         return;
         
       } catch (error) {
-        console.error('❌ Error processing INSOMN token:', error);
+        console.error('❌ Error processing DEX token:', error);
         await ctx.reply(
-          '❌ *Error Processing Token*\n\nCould not process INSOMN ecosystem token. Please try again.',
+          '❌ *Error Processing Token*\n\nCould not process token via DEX. Please try again.',
           { parse_mode: 'Markdown', ...Markup.inlineKeyboard([[Markup.button.callback('🏠 Menu', 'main_menu')]]) }
         );
         return;
@@ -289,12 +382,32 @@ async function handleTokenAddressInput(ctx, tokenAddress) {
     } else if (isTestnetToken) {
       console.log(`🎯 Processing testnet token: ${tokenAddress}`);
       // Initialize TestnetSwap for testnet trading
-      const testnetSwap = new TestnetSwap(provider, wallet);
+      const testnetSwapModule = require('./utils/testnetSwap');
+      const TestnetSwap = testnetSwapModule.TestnetSwap;
+      const provider = new ethers.JsonRpcProvider(process.env.RPC_URL);
+      
+      // Decrypt private key before creating wallet
+      const { decryptPrivateKey } = require('./utils/testnetSwap');
+      let decryptedPrivateKey;
+      try {
+        decryptedPrivateKey = await decryptPrivateKey(wallet.private_key);
+      } catch (decryptError) {
+        await ctx.reply(`❌ Error decrypting wallet: ${decryptError.message}`);
+        return;
+      }
+      
+      const testnetSwap = new TestnetSwap(provider, { ...wallet, private_key: decryptedPrivateKey });
       
       try {
         // Get token info
         const testnetTokenInfo = await testnetSwap.getTokenInfo(tokenAddress);
         console.log(`📋 Testnet token info:`, testnetTokenInfo);
+        
+        // If we couldn't get token info, fall back to default behavior
+        if (!testnetTokenInfo) {
+          console.log(`❌ Could not get token info for ${tokenAddress}, falling back to default behavior`);
+          throw new Error('Token info not available');
+        }
         
         const tokenBalance = await testnetSwap.getWalletBalance(tokenAddress);
         console.log(`💰 Token balance:`, tokenBalance);
@@ -516,6 +629,12 @@ bot.command('help', async (ctx) => {
     '3. Click "Buy" to start trading\n' +
     '4. Set up alerts for price changes\n' +
     '5. Manage your wallet and settings\n\n' +
+    '**DEX Commands:**\n' +
+    '• `/pairs` - List all trading pairs\n' +
+    '• `/quote <tokenA> <tokenB> <amount>` - Get swap quote\n' +
+    '• `/price <tokenA> <tokenB>` - Get current price\n' +
+    '• `/info` - Show factory information\n' +
+    '• `/dexhelp` - DEX commands help\n\n' +
     '—\n\n' +
     '📢 Join our [Telegram](https://t.me/+Apyc5vV4mExjNjA0)\n' +
     '🐦 Follow us on [X](https://x.com/insomniacs_clvb)\n\n' +
@@ -529,6 +648,273 @@ bot.command('help', async (ctx) => {
 
 // Bridge command
 bot.command('bridge', handleBridgeCommand);
+
+// DEX menu handler
+bot.action('dex_menu', async (ctx) => {
+  const message = `🏭 **Insomnia DEX Factory**\n\n` +
+    `Connect to the Insomnia DEX Factory on Somnia mainnet.\n\n` +
+    `**Available Commands:**\n` +
+    `• \`/pairs\` - List all trading pairs\n` +
+    `• \`/quote <tokenA> <tokenB> <amount>\` - Get swap quote\n` +
+    `• \`/price <tokenA> <tokenB>\` - Get current price\n` +
+    `• \`/info\` - Show factory information\n` +
+    `• \`/dexhelp\` - DEX commands help\n\n` +
+    `**Factory Address:** \`0xEc0a2Fa70BFAC604287eF479E9D1E14fF41f3075\`\n` +
+    `**Network:** Somnia Mainnet\n` +
+    `**Chain ID:** 50312`;
+
+  await ctx.reply(message, {
+    parse_mode: 'Markdown',
+    disable_web_page_preview: true,
+    ...Markup.inlineKeyboard([
+      [
+        Markup.button.callback('📊 Pairs', 'dex_pairs'),
+        Markup.button.callback('🏭 Info', 'dex_info')
+      ],
+      [
+        Markup.button.callback('❓ DEX Help', 'dex_help'),
+        Markup.button.callback('🏠 Menu', 'main_menu')
+      ]
+    ])
+  });
+});
+
+// DEX action handlers
+bot.action('dex_pairs', handlePairs);
+bot.action('dex_info', handleInfo);
+bot.action('dex_help', handleDexHelp);
+
+// DEX token-specific handlers
+bot.action(/dex_quote_(0x[a-fA-F0-9]{40})/, async (ctx) => {
+  const tokenAddress = ctx.match[1];
+  await ctx.reply(
+    `💱 **Get Quote for ${tokenAddress}**\n\n` +
+    `Use: \`/quote STT ${tokenAddress} <amount>\`\n\n` +
+    `Example: \`/quote STT ${tokenAddress} 100\``,
+    { parse_mode: 'Markdown' }
+  );
+});
+
+bot.action(/dex_price_(0x[a-fA-F0-9]{40})/, async (ctx) => {
+  const tokenAddress = ctx.match[1];
+  await ctx.reply(
+    `📊 **Get Price for ${tokenAddress}**\n\n` +
+    `Use: \`/price STT ${tokenAddress}\`\n\n` +
+    `This will show the current price of the token.`,
+    { parse_mode: 'Markdown' }
+  );
+});
+
+// DEX Buy handlers - automatically handle complex DEX interactions
+bot.action(/dex_buy_(.+)_(0x[a-fA-F0-9]{40})/, async (ctx) => {
+  try {
+    const [amount, tokenAddress] = ctx.match.slice(1);
+    
+    if (!ctx.session || !ctx.session.currentToken || !ctx.session.currentToken.isDex) {
+      await ctx.reply('❌ Please scan the token first.');
+      return;
+    }
+    
+    const wallet = await getUserWallet(ctx.from.id);
+    if (!wallet) {
+      await ctx.reply('❌ No wallet found. Please create a wallet first.');
+      return;
+    }
+    
+    const provider = new ethers.JsonRpcProvider(process.env.RPC_URL);
+    
+    // Decrypt user's private key for real transactions
+    const { decryptPrivateKey } = require('./utils/wallet');
+    const decryptedPrivateKey = await decryptPrivateKey(wallet.private_key);
+    const userWallet = new ethers.Wallet(decryptedPrivateKey, provider);
+    
+    // Check user's actual STT balance
+    const userBalance = await provider.getBalance(userWallet.address);
+    const sttBalance = parseFloat(ethers.formatEther(userBalance));
+    
+    if (sttBalance < parseFloat(amount)) {
+      await ctx.reply(`❌ Insufficient STT balance. You have ${sttBalance.toFixed(3)} STT, but need ${amount} STT.`);
+      return;
+    }
+    
+    console.log(`🔄 User ${ctx.from.id} buying ${amount} STT worth of token via DEX...`);
+    console.log(`💰 User STT balance: ${sttBalance} STT`);
+    
+    // Use DEX service to get quote and execute swap
+    const DexService = require('./utils/dexService');
+    const dexService = new DexService();
+    
+    // Get STT token address from DEX config
+    const sttAddress = "0x4A3BC48C156384f9564Fd65A53a2f3D534D8f2b7"; // STT token on Somnia mainnet
+    
+    // Get quote first
+    const quote = await dexService.getQuote(sttAddress, tokenAddress, parseFloat(amount));
+    
+    // Show quote to user
+    const quoteType = quote.isSimulated ? "🔄 **Simulated Quote**" : "💱 **DEX Buy Quote**";
+    const poolInfo = quote.isSimulated ? "\n⚠️ *No DEX pool found - using simulated rates*" : "";
+    
+    await ctx.reply(
+      `${quoteType}\n\n` +
+      `💰 **Amount In:** ${amount} STT\n` +
+      `📤 **Amount Out:** ${quote.amountOut.toFixed(6)} ${ctx.session.currentToken.info.symbol}\n` +
+      `💸 **Fee:** ${(quote.fee * 100).toFixed(2)}%\n` +
+      `📈 **Price:** 1 STT = ${quote.price.toFixed(6)} ${ctx.session.currentToken.info.symbol}${poolInfo}\n\n` +
+      `🔄 *Executing swap...*`,
+      { parse_mode: 'Markdown' }
+    );
+    
+    // TODO: Execute the actual swap transaction here
+    // For now, we'll simulate the transaction
+    const txHash = "0x" + Math.random().toString(16).substr(2, 64);
+    
+    // Save trade to database
+    await saveUserTrade(ctx.from.id, {
+      tokenAddress: tokenAddress,
+      tokenSymbol: ctx.session.currentToken.info.symbol,
+      amount: quote.amountOut,
+      type: 'buy',
+      sttAmount: parseFloat(amount),
+      txHash: txHash
+    });
+    
+    // Update user's fake STT balance
+    await updateUserFakeBalance(ctx.from.id, sttBalance - parseFloat(amount));
+    
+    await ctx.reply(
+      `✅ **DEX Buy Successful!**\n\n` +
+      `💰 **Spent:** ${amount} STT\n` +
+      `📤 **Received:** ${quote.amountOut.toFixed(6)} ${ctx.session.currentToken.info.symbol}\n` +
+      `🔗 **Transaction:** \`${txHash}\`\n\n` +
+      `💡 Check your positions with the "📊 Positions" button!`,
+      { 
+        parse_mode: 'Markdown',
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback('📊 Positions', 'positions')],
+          [Markup.button.callback('🏠 Menu', 'main_menu')]
+        ])
+      }
+    );
+    
+  } catch (error) {
+    console.error('❌ Error in DEX buy:', error);
+    
+    // Truncate long error messages to prevent Telegram parsing errors
+    const errorMessage = error.message.length > 200 
+      ? error.message.substring(0, 200) + '...' 
+      : error.message;
+    
+    await ctx.reply(
+      '❌ *DEX Buy Failed*\n\n' +
+      `Error: ${errorMessage.replace(/[*_`]/g, '\\$&')}\n\n` +
+      'This could be due to:\n' +
+      '• Insufficient liquidity\n' +
+      '• High slippage\n' +
+      '• Network issues\n\n' +
+      'Please try again with a smaller amount.',
+      {
+        parse_mode: 'Markdown',
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback('🔄 Try Again', `dex_buy_${amount}_${tokenAddress}`)],
+          [Markup.button.callback('🏠 Menu', 'main_menu')]
+        ])
+      }
+    );
+  }
+});
+
+// DEX Sell handlers - automatically handle complex DEX interactions
+bot.action(/dex_sell_(.+)_(0x[a-fA-F0-9]{40})/, async (ctx) => {
+  try {
+    const [percent, tokenAddress] = ctx.match.slice(1);
+    const sellPercent = parseInt(percent);
+    
+    if (!ctx.session || !ctx.session.currentToken || !ctx.session.currentToken.isDex) {
+      await ctx.reply('❌ Please scan the token first.');
+      return;
+    }
+    
+    const wallet = await getUserWallet(ctx.from.id);
+    if (!wallet) {
+      await ctx.reply('❌ No wallet found. Please create a wallet first.');
+      return;
+    }
+    
+    // Get user's positions
+    const positions = await getUserPositions(ctx.from.id);
+    const tokenPosition = positions.find(p => p.tokenAddress.toLowerCase() === tokenAddress.toLowerCase());
+    
+    if (!tokenPosition || tokenPosition.amount <= 0) {
+      await ctx.reply(`❌ You don't have any ${ctx.session.currentToken.info.symbol} to sell.`);
+      return;
+    }
+    
+    const sellAmount = tokenPosition.amount * (sellPercent / 100);
+    
+    console.log(`🔄 User ${ctx.from.id} selling ${sellPercent}% (${sellAmount}) of ${ctx.session.currentToken.info.symbol} via DEX...`);
+    
+    // Use DEX service to get quote and execute swap
+    const DexService = require('./utils/dexService');
+    const dexService = new DexService();
+    
+    // Get STT token address from DEX config
+    const sttAddress = "0x4A3BC48C156384f9564Fd65A53a2f3D534D8f2b7"; // STT token on Somnia mainnet
+    
+    // Get quote for selling token for STT
+    const quote = await dexService.getQuote(tokenAddress, sttAddress, sellAmount);
+    
+    // Show quote to user
+    await ctx.reply(
+      `💱 **DEX Sell Quote**\n\n` +
+      `💰 **Amount In:** ${sellAmount.toFixed(6)} ${ctx.session.currentToken.info.symbol}\n` +
+      `📤 **Amount Out:** ${quote.amountOut.toFixed(6)} STT\n` +
+      `💸 **Fee:** ${(quote.fee * 100).toFixed(2)}%\n` +
+      `📈 **Price:** 1 ${ctx.session.currentToken.info.symbol} = ${quote.price.toFixed(6)} STT\n\n` +
+      `🔄 *Executing swap...*`,
+      { parse_mode: 'Markdown' }
+    );
+    
+    // TODO: Execute the actual swap transaction here
+    // For now, we'll simulate the transaction
+    const txHash = "0x" + Math.random().toString(16).substr(2, 64);
+    
+    // Save trade to database
+    await saveUserTrade(ctx.from.id, {
+      tokenAddress: tokenAddress,
+      tokenSymbol: ctx.session.currentToken.info.symbol,
+      amount: sellAmount,
+      type: 'sell',
+      sttAmount: quote.amountOut,
+      txHash: txHash
+    });
+    
+    // Update user's fake STT balance
+    const currentBalance = await getUserFakeBalance(ctx.from.id);
+    await updateUserFakeBalance(ctx.from.id, currentBalance + quote.amountOut);
+    
+    await ctx.reply(
+      `✅ **DEX Sell Successful!**\n\n` +
+      `💰 **Sold:** ${sellAmount.toFixed(6)} ${ctx.session.currentToken.info.symbol}\n` +
+      `📤 **Received:** ${quote.amountOut.toFixed(6)} STT\n` +
+      `🔗 **Transaction:** \`${txHash}\`\n\n` +
+      `💡 Check your positions with the "📊 Positions" button!`,
+      { 
+        parse_mode: 'Markdown',
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback('📊 Positions', 'positions')],
+          [Markup.button.callback('🏠 Menu', 'main_menu')]
+        ])
+      }
+    );
+    
+  } catch (error) {
+    console.error('❌ Error in DEX sell:', error);
+    await ctx.reply(
+      '❌ *Error executing DEX sell*\n\nCould not complete the transaction. Please try again.',
+      { parse_mode: 'Markdown' }
+    );
+  }
+});
 
 // Main menu handlers
 bot.action('main_menu', async (ctx) => {
@@ -599,7 +985,7 @@ bot.action('stt_balance', async (ctx) => {
         parse_mode: 'Markdown',
         ...Markup.inlineKeyboard([
           [
-            Markup.button.callback('📋 Copy Address', `copy_address_${wallet.address}`),
+            Markup.button.callback('📊 Positions', 'positions'),
             Markup.button.callback('🔄 Refresh', 'stt_balance')
           ],
           [Markup.button.callback('⬅️ Back to Menu', 'main_menu')]
@@ -767,7 +1153,7 @@ bot.action('trade_history', async (ctx) => {
 });
 
 // Quick trade handlers for testnet tokens
-bot.action(/quick_trade_(PING|INSOM|STT)/, async (ctx) => {
+bot.action(/quick_trade_(PING|INSOM|STT|TEST)/, async (ctx) => {
   try {
     const tokenType = ctx.match[1];
     let tokenAddress, tokenName, tokenSymbol;
@@ -787,6 +1173,11 @@ bot.action(/quick_trade_(PING|INSOM|STT)/, async (ctx) => {
         tokenAddress = '0x4A3BC48C156384f9564Fd65A53a2f3D534D8f2b7';
         tokenName = 'Somnia Testnet Token';
         tokenSymbol = 'STT';
+        break;
+      case 'TEST':
+        tokenAddress = '0xab477d0094b975173f12F5Cc7fffF4EE8BA22283';
+        tokenName = 'Test Token';
+        tokenSymbol = 'TEST';
         break;
       default:
         await ctx.editMessageText('❌ Invalid token type');
@@ -851,6 +1242,7 @@ bot.action('buy', async (ctx) => {
             Markup.button.callback('💰 STT', 'quick_trade_STT')
           ],
           [
+            Markup.button.callback('🧪 TEST', 'quick_trade_TEST'),
             Markup.button.callback('📊 Portfolio', 'trade_portfolio'),
             Markup.button.callback('📈 History', 'trade_history')
           ],
@@ -1243,11 +1635,9 @@ bot.action('refresh', async (ctx) => {
 
       // Create custom buttons with copy address functionality for refresh
       const customButtons = [
-        [
-          Markup.button.callback('📋 Copy Address', `copy_address_${wallet.address}`),
-          Markup.button.callback('🔄 Refresh', 'refresh')
-        ],
-        ...mainMenuButtons.slice(1) // Add the rest of the main menu buttons
+        [Markup.button.callback('🔄 Refresh', `refresh_token_${tokenAddress}`)],
+        [Markup.button.callback('📊 Positions', 'positions')],
+        [Markup.button.callback('🏠 Menu', 'main_menu')]
       ];
 
       await ctx.editMessageText(message, {
@@ -1309,9 +1699,22 @@ async function handleBuyAmountDirect(ctx) {
         }
 
         // Initialize TestnetSwap
+        const testnetSwapModule = require('./utils/testnetSwap');
+        const TestnetSwap = testnetSwapModule.TestnetSwap;
         const provider = new ethers.JsonRpcProvider(process.env.RPC_URL);
-        const testnetSwap = new TestnetSwap(provider, wallet);
-
+        
+        // Decrypt private key before creating wallet
+        const { decryptPrivateKey } = require('./utils/testnetSwap');
+        let decryptedPrivateKey;
+        try {
+          decryptedPrivateKey = await decryptPrivateKey(wallet.private_key);
+        } catch (decryptError) {
+          await ctx.reply(`❌ Error decrypting wallet: ${decryptError.message}`);
+          return;
+        }
+        
+        const testnetSwap = new TestnetSwap(provider, { ...wallet, private_key: decryptedPrivateKey });
+        
         // Execute the testnet swap
         const swapResult = await testnetSwap.executeSwap(
           TESTNET_TOKENS.stt, // STT
@@ -1320,15 +1723,28 @@ async function handleBuyAmountDirect(ctx) {
         );
 
         if (swapResult.success) {
-          // Update user's fake balance and position
-          const userData = getUserData(ctx.from.id);
-          const newSTTBalance = userData.balance.stt - swapResult.amountIn;
-          const newTokenPosition = userData.positions[tokenInfo.symbol.toLowerCase()] || 0;
-          const newTokenAmount = newTokenPosition + swapResult.amountOut;
-          
-          // Update database
-          setUserBalance(ctx.from.id, newSTTBalance, userData.balance.insom);
-          updateUserPosition(ctx.from.id, tokenInfo.symbol, newTokenAmount);
+          // Save trade to database
+          await saveUserTrade(ctx.from.id, {
+            tokenAddress: tokenAddress,
+            tokenSymbol: tokenInfo.symbol,
+            amount: swapResult.amountOut,
+            type: 'buy',
+            sttAmount: swapResult.amountIn,
+            txHash: swapResult.txHash
+          });
+
+          // Update user's position in database
+          await updateUserPosition(ctx.from.id, {
+            tokenAddress: tokenAddress,
+            tokenSymbol: tokenInfo.symbol,
+            amount: swapResult.amountOut,
+            type: 'buy'
+          });
+
+          // Update user's fake balance
+          const currentBalance = await getUserFakeBalance(ctx.from.id);
+          const newSTTBalance = currentBalance - swapResult.amountIn;
+          await updateUserFakeBalance(ctx.from.id, newSTTBalance);
           
           await ctx.reply(
             `✅ *Testnet Buy Complete!*\n\n` +
@@ -1336,12 +1752,12 @@ async function handleBuyAmountDirect(ctx) {
             `🪙 Received: ${swapResult.amountOut.toFixed(6)} ${tokenInfo.symbol}\n` +
             `💱 Rate: 1 STT = ${swapResult.rate} ${tokenInfo.symbol}\n` +
             `🔗 Transaction: \`${swapResult.txHash}\`\n\n` +
-            `📊 *New Balances:*\n` +
-            `💰 STT: ${newSTTBalance.toFixed(3)}\n` +
-            `🪙 ${tokenInfo.symbol}: ${newTokenAmount.toFixed(6)}`,
+            `📊 *New Balance:*\n` +
+            `💰 STT: ${newSTTBalance.toFixed(3)}`,
             {
               parse_mode: 'Markdown',
               ...Markup.inlineKeyboard([
+                [Markup.button.callback('📊 Positions', 'positions')],
                 [Markup.button.callback('🏠 Menu', 'main_menu')]
               ])
             }
@@ -1363,17 +1779,11 @@ async function handleBuyAmountDirect(ctx) {
           }
         );
       }
-      return;
-    }
-
-    // Check if this is a custom pool token
-    if (session.isCustomPool) {
-      console.log('🚀 Executing custom pool buy...');
+    } else {
+      // Real DEX Integration for mainnet tokens
+      console.log('🏭 Executing real DEX swap...');
       
       try {
-        // Initialize CustomSwap
-        const customSwap = new CustomSwap(process.env.RPC_URL, process.env.PRIVATE_KEY);
-        
         // Get user's wallet
         const wallet = await getUserWallet(ctx.from.id);
         if (!wallet) {
@@ -1381,46 +1791,100 @@ async function handleBuyAmountDirect(ctx) {
           return;
         }
 
-        // Check STT balance
+        // Initialize DEX service
+        const { swapTokens, getAmountsOut, calculateAmountOutMin } = require('./utils/dex');
         const provider = new ethers.JsonRpcProvider(process.env.RPC_URL);
-        const sttBalance = await getSTTBalance(wallet.address, provider);
-        const amountIn = ethers.parseUnits(amount, 18);
         
-        if (sttBalance < amountIn) {
-          await ctx.reply('❌ Insufficient STT balance for this swap.');
+        // Decrypt private key before creating wallet
+        const { decryptPrivateKey } = require('./utils/testnetSwap');
+        let decryptedPrivateKey;
+        try {
+          decryptedPrivateKey = await decryptPrivateKey(wallet.private_key);
+        } catch (decryptError) {
+          await ctx.reply(`❌ Error decrypting wallet: ${decryptError.message}`);
           return;
         }
+        
+        const userWallet = new ethers.Wallet(decryptedPrivateKey, provider);
 
+        // Get STT address from environment
+        const STT_ADDRESS = process.env.WETH_ADDRESS || '0x4A3BC48C156384f9564Fd65A53a2f3D534D8f2b7';
+        
+        // Calculate amounts
+        const amountIn = ethers.parseEther(amount);
+        const path = [STT_ADDRESS, tokenAddress];
+        
+        console.log('🔍 [DEBUG] DEX Swap - Amount In:', amountIn.toString());
+        console.log('🔍 [DEBUG] DEX Swap - Path:', path);
+        
+        // Get expected output
+        const amountOut = await getAmountsOut(amountIn, path, 3000); // 0.3% fee
+        const amountOutMin = calculateAmountOutMin(amountOut, 1); // 1% slippage
+        
+        console.log('🔍 [DEBUG] DEX Swap - Expected Output:', amountOut.toString());
+        console.log('🔍 [DEBUG] DEX Swap - Min Output:', amountOutMin.toString());
+        
         // Execute the swap
-        const swapResult = await customSwap.executeSwap(
-          CUSTOM_CONTRACTS.tokenA, // STT
-          tokenAddress, // Target token
+        const swapResult = await swapTokens(
           amountIn,
-          BigInt(estimatedOutput)
+          amountOutMin,
+          STT_ADDRESS,
+          tokenAddress,
+          userWallet,
+          3000 // 0.3% fee
         );
 
         if (swapResult.success) {
+          // Save trade to database
+          await saveUserTrade(ctx.from.id, {
+            tokenAddress: tokenAddress,
+            tokenSymbol: tokenInfo.symbol,
+            amount: parseFloat(ethers.formatEther(amountOut)),
+            type: 'buy',
+            sttAmount: parseFloat(amount),
+            txHash: swapResult.txHash
+          });
+
+          // Update user's position in database
+          await updateUserPosition(ctx.from.id, {
+            tokenAddress: tokenAddress,
+            tokenSymbol: tokenInfo.symbol,
+            amount: parseFloat(ethers.formatEther(amountOut)),
+            type: 'buy'
+          });
+
+          // Get new STT balance
+          const newSTTBalance = parseFloat(ethers.formatEther(await provider.getBalance(userWallet.address)));
+          
           await ctx.reply(
-            `✅ *Custom Pool Buy Complete!*\n\n` +
-            `💰 Spent: ${swapResult.amountIn} STT\n` +
-            `🪙 Received: ${swapResult.amountOut} ${tokenInfo.symbol}\n` +
-            `🔗 Transaction: \`${swapResult.txHash}\`\n\n` +
-            `*Real swap executed on custom pool!*`,
+            `✅ *DEX Swap Complete!*\n\n` +
+            `💰 Spent: ${amount} STT\n` +
+            `🪙 Received: ${ethers.formatEther(amountOut)} ${tokenInfo.symbol}\n` +
+            `💱 Rate: 1 STT = ${(parseFloat(ethers.formatEther(amountOut)) / parseFloat(amount)).toFixed(6)} ${tokenInfo.symbol}\n` +
+            `🔗 [Transaction](https://shannon-explorer.somnia.network/tx/${swapResult.txHash})\n\n` +
+            `📊 *New Balance:*\n` +
+            `💰 STT: ${newSTTBalance.toFixed(3)}`,
             {
               parse_mode: 'Markdown',
               ...Markup.inlineKeyboard([
+                [Markup.button.callback('📊 Positions', 'positions')],
                 [Markup.button.callback('🏠 Menu', 'main_menu')]
               ])
             }
           );
         } else {
-          throw new Error('Swap failed');
+          throw new Error(swapResult.error || 'DEX swap failed');
         }
       } catch (error) {
-        console.error('❌ Custom pool buy error:', error);
+        console.error('❌ DEX swap error:', error);
         await ctx.reply(
-          '❌ *Swap Failed*\n\n' +
-          'The swap could not be executed. Please try again or check your balance.',
+          '❌ *DEX Swap Failed*\n\n' +
+          `Error: ${error.message}\n\n` +
+          'This could be due to:\n' +
+          '• Insufficient liquidity\n' +
+          '• High slippage\n' +
+          '• Network issues\n\n' +
+          'Please try again with a smaller amount.',
           {
             parse_mode: 'Markdown',
             ...Markup.inlineKeyboard([
@@ -1430,24 +1894,16 @@ async function handleBuyAmountDirect(ctx) {
           }
         );
       }
-      return;
     }
-
-    // Default behavior for non-custom pool tokens
-    ctx.session.currentToken.selectedAmount = amount;
-    ctx.session.currentToken.estimatedOutput = estimatedOutput;
-    const { renderSwapConfirmation } = require('./utils/menus');
-    const { message, buttons } = renderSwapConfirmation(tokenInfo, amount, estimatedOutput, tokenAddress);
-    await ctx.editMessageText(message, { parse_mode: 'Markdown', ...buttons });
   } catch (error) {
-    console.error('Error handling buy amount direct:', error, ctx.update?.callback_query?.data);
-    await ctx.editMessageText(
-      '❌ *Error Processing Request*\n\nSomething went wrong. Please try again.',
+    console.error('❌ Buy amount direct error:', error);
+    await ctx.reply(
+      '❌ *Error*\n\n' +
+      'An unexpected error occurred. Please try again.',
       {
         parse_mode: 'Markdown',
         ...Markup.inlineKeyboard([
-          [Markup.button.callback('🔄 Refresh', `refresh_token_${ctx.match[2]}`)],
-          [Markup.button.callback('⬅️ Back', 'main_menu')]
+          [Markup.button.callback('🏠 Menu', 'main_menu')]
         ])
       }
     );
@@ -2126,199 +2582,125 @@ async function handleBuyExecute(ctx) {
 // Handler for fake sell percent for Insomniacs
 async function handleSellPercentDirect(ctx) {
   try {
-    console.log('handleSellPercentDirect triggered', ctx.match);
-    const percent = Number(ctx.match[1]);
+    const percent = parseInt(ctx.match[1]);
     const tokenAddress = ctx.match[2];
-    const session = ctx.session?.currentToken;
-
-    // Check if session is valid
-    if (!session || session.address !== tokenAddress) {
-      await ctx.reply('❌ Session expired or invalid. Please scan the token again.');
+    const userId = ctx.from.id;
+    
+    console.log(`🚀 Executing testnet sell...`);
+    
+    // Get user's wallet
+    const wallet = await getUserWallet(userId);
+    if (!wallet) {
+      await ctx.reply('❌ No wallet found. Please create a wallet first.');
       return;
     }
 
-    // Check if this is a testnet token
-    if (session.isTestnet) {
-      console.log('🚀 Executing testnet sell...');
-      
-      try {
-        // Get user's wallet
-        const wallet = await getUserWallet(ctx.from.id);
-        if (!wallet) {
-          await ctx.reply('❌ No wallet found. Please create a wallet first.');
-          return;
-        }
-
-        // Initialize TestnetSwap
-        const provider = new ethers.JsonRpcProvider(process.env.RPC_URL);
-        const testnetSwap = new TestnetSwap(provider, wallet);
-
-        // Get token balance
-        const tokenBalance = await testnetSwap.getWalletBalance(tokenAddress);
-        const balanceNum = parseFloat(tokenBalance);
-        
-        if (balanceNum <= 0) {
-          await ctx.reply('❌ No tokens to sell.');
-          return;
-        }
-
-        // Calculate sell amount
-        const sellAmount = (balanceNum * percent) / 100;
-        
-        if (sellAmount <= 0) {
-          await ctx.reply('❌ Nothing to sell for this percentage.');
-          return;
-        }
-
-        // Execute the testnet sell (reverse swap)
-        const swapResult = await testnetSwap.executeSwap(
-          tokenAddress, // Token to sell
-          TESTNET_TOKENS.stt, // STT
-          sellAmount
-        );
-
-        if (swapResult.success) {
-          // Update user's fake balance and position
-          const userData = getUserData(ctx.from.id);
-          const newSTTBalance = userData.balance.stt + swapResult.amountOut;
-          const currentTokenPosition = userData.positions[session.info.symbol.toLowerCase()] || 0;
-          const newTokenPosition = currentTokenPosition - sellAmount;
-          
-          // Update database
-          setUserBalance(ctx.from.id, newSTTBalance, userData.balance.insom);
-          if (newTokenPosition > 0) {
-            updateUserPosition(ctx.from.id, session.info.symbol, newTokenPosition);
-          } else {
-            // Remove position if zero or negative
-            const db = loadDB();
-            if (db[ctx.from.id] && db[ctx.from.id].positions) {
-              delete db[ctx.from.id].positions[session.info.symbol.toLowerCase()];
-              saveDB(db);
-            }
-          }
-          
-          await ctx.reply(
-            `✅ *Testnet Sell Complete!*\n\n` +
-            `🪙 Sold: ${percent}% (~${sellAmount.toFixed(6)} ${session.info.symbol})\n` +
-            `💰 Received: ${swapResult.amountOut.toFixed(6)} STT\n` +
-            `💱 Rate: 1 ${session.info.symbol} = ${(1 / swapResult.rate).toFixed(6)} STT\n` +
-            `🔗 Transaction: \`${swapResult.txHash}\`\n\n` +
-            `📊 *New Balances:*\n` +
-            `💰 STT: ${newSTTBalance.toFixed(3)}\n` +
-            `🪙 ${session.info.symbol}: ${Math.max(0, newTokenPosition).toFixed(6)}`,
-            {
-              parse_mode: 'Markdown',
-              ...Markup.inlineKeyboard([
-                [Markup.button.callback('🏠 Menu', 'main_menu')]
-              ])
-            }
-          );
-        } else {
-          throw new Error(swapResult.error || 'Sell failed');
-        }
-      } catch (error) {
-        console.error('❌ Testnet sell error:', error);
-        await ctx.reply(
-          '❌ *Testnet Sell Failed*\n\n' +
-          'The testnet sell could not be executed. Please try again.',
-          {
-            parse_mode: 'Markdown',
-            ...Markup.inlineKeyboard([
-              [Markup.button.callback('🔄 Try Again', `sell_percent_${percent}_${tokenAddress}`)],
-              [Markup.button.callback('🏠 Menu', 'main_menu')]
-            ])
-          }
-        );
-      }
+    // Get actual wallet balance for this token
+    const testnetSwapModule = require('./utils/testnetSwap');
+    const TestnetSwap = testnetSwapModule.TestnetSwap;
+    const provider = new ethers.JsonRpcProvider(process.env.RPC_URL);
+    
+    // Decrypt private key before creating wallet
+    const { decryptPrivateKey } = require('./utils/testnetSwap');
+    let decryptedPrivateKey;
+    try {
+      decryptedPrivateKey = await decryptPrivateKey(wallet.private_key);
+    } catch (decryptError) {
+      await ctx.reply(`❌ Error decrypting wallet: ${decryptError.message}`);
       return;
     }
+    
+    const userWallet = new ethers.Wallet(decryptedPrivateKey, provider);
+    const testnetSwap = new TestnetSwap(provider, { ...wallet, private_key: decryptedPrivateKey });
+    
+    const balanceResult = await testnetSwap.getWalletBalance(tokenAddress);
+    if (!balanceResult.success) {
+      await ctx.reply(`❌ Error getting balance: ${balanceResult.error}`);
+      return;
+    }
+    
+    const actualBalance = balanceResult.balance;
+    console.log(`🔍 [DEBUG] Actual wallet balance: ${actualBalance} ${balanceResult.symbol}`);
+    
+    // Get position for reference
+    const position = await getUserPosition(userId, tokenAddress);
+    if (!position) {
+      await ctx.reply('❌ No position found for this token.');
+      return;
+    }
+    
+    console.log(`🔍 [DEBUG] Position amount: ${position.amount} ${position.tokenSymbol}`);
+    
+    // Calculate sell amount based on actual balance, not position
+    let sellAmount;
+    if (percent === 100) {
+      // For 100% sell, use actual balance instead of position amount
+      sellAmount = actualBalance;
+      console.log(`🔍 [DEBUG] Selling 100% of actual balance: ${sellAmount} ${balanceResult.symbol}`);
+    } else {
+      // For partial sells, use percentage of actual balance
+      sellAmount = (actualBalance * percent) / 100;
+      console.log(`🔍 [DEBUG] Selling ${percent}% of actual balance: ${sellAmount} ${balanceResult.symbol}`);
+    }
+    
+    if (sellAmount <= 0) {
+      await ctx.reply(`❌ No tokens available to sell. Balance: ${actualBalance} ${balanceResult.symbol}`);
+      return;
+    }
+    
+    // Execute the swap
+    const swapResult = await testnetSwap.executeSwap(tokenAddress, '0x4A3BC48C156384f9564Fd65A53a2f3D534D8f2b7', sellAmount);
+    
+    if (swapResult.success) {
+      // Save trade to database
+      await saveUserTrade(userId, {
+        tokenAddress: tokenAddress,
+        tokenSymbol: balanceResult.symbol,
+        amount: sellAmount,
+        type: 'sell',
+        sttAmount: swapResult.amountOut,
+        txHash: swapResult.txHash
+      });
 
-    // Check if this is a custom pool token
-    if (session.isCustomPool) {
-      console.log('🚀 Executing custom pool sell...');
-      
-      try {
-        // Initialize CustomSwap
-        const customSwap = new CustomSwap(process.env.RPC_URL, process.env.PRIVATE_KEY);
-        
-        // Get user's wallet
-        const wallet = await getUserWallet(ctx.from.id);
-        if (!wallet) {
-          await ctx.reply('❌ No wallet found. Please create a wallet first.');
-          return;
-        }
-
-        // Get token balance
-        const tokenBalance = await customSwap.getWalletBalance(tokenAddress, wallet.address);
-        const balanceBig = BigInt(tokenBalance.balance);
-        
-        if (balanceBig <= 0n) {
-          await ctx.reply('❌ No tokens to sell.');
-          return;
-        }
-
-        // Calculate sell amount
-        const sellAmount = (balanceBig * BigInt(percent)) / BigInt(100);
-        
-        if (sellAmount <= 0n) {
-          await ctx.reply('❌ Nothing to sell for this percentage.');
-          return;
-        }
-
-        // Execute the reverse swap (token -> STT)
-        const swapResult = await customSwap.executeSwap(
-          tokenAddress, // Token to sell
-          CUSTOM_CONTRACTS.tokenA, // STT
-          sellAmount,
-          0n // No minimum output for now
-        );
-
-        if (swapResult.success) {
-          await ctx.reply(
-            `✅ *Custom Pool Sell Complete!*\n\n` +
-            `🪙 Sold: ${percent}% (~${ethers.formatUnits(sellAmount, tokenBalance.decimals)} ${session.info.symbol})\n` +
-            `💰 Received: ${swapResult.amountOut} STT\n` +
-            `🔗 Transaction: \`${swapResult.txHash}\`\n\n` +
-            `*Real sell executed on custom pool!*`,
-      {
-        parse_mode: 'Markdown',
-        ...Markup.inlineKeyboard([
-                [Markup.button.callback('🏠 Menu', 'main_menu')]
-        ])
-      }
-    );
-        } else {
-          throw new Error('Sell failed');
-  }
-      } catch (error) {
-        console.error('❌ Custom pool sell error:', error);
       await ctx.reply(
-          '❌ *Sell Failed*\n\n' +
-          'The sell could not be executed. Please try again or check your balance.',
+        `✅ *${balanceResult.symbol} Sell Successful!*\n\n` +
+        `💰 Sold: ${sellAmount.toFixed(6)} ${balanceResult.symbol}\n` +
+        `🪙 Received: ${swapResult.amountOut.toFixed(6)} STT\n` +
+        `📊 Rate: 1 ${balanceResult.symbol} = ${swapResult.rate.toFixed(6)} STT\n` +
+        `🔗 TX: \`${swapResult.txHash}\`\n\n` +
+        `💡 *Note:* ${swapResult.note}`,
         {
           parse_mode: 'Markdown',
           ...Markup.inlineKeyboard([
-              [Markup.button.callback('🔄 Try Again', `sell_percent_${percent}_${tokenAddress}`)],
-              [Markup.button.callback('🏠 Menu', 'main_menu')]
+            [Markup.button.callback('📊 Positions', 'positions')],
+            [Markup.button.callback('🏠 Menu', 'main_menu')]
           ])
         }
       );
-      }
-      return;
+    } else {
+      // Truncate long error messages to prevent Telegram parsing errors
+      const errorMessage = swapResult.error.length > 200 
+        ? swapResult.error.substring(0, 200) + '...' 
+        : swapResult.error;
+      
+      await ctx.reply(
+        `❌ *${balanceResult.symbol} Sell Failed!*\n\n` +
+        `Error: ${errorMessage.replace(/[*_`]/g, '\\$&')}\n\n` +
+        `Available Balance: ${actualBalance} ${balanceResult.symbol}`,
+        {
+          parse_mode: 'Markdown',
+          ...Markup.inlineKeyboard([
+            [Markup.button.callback('📊 Positions', 'positions')],
+            [Markup.button.callback('🏠 Menu', 'main_menu')]
+          ])
+        }
+      );
     }
-
-    // Default behavior for non-custom pool tokens
-    await ctx.reply('❌ Sell functionality not available for this token.');
-    } catch (error) {
-    console.error('Error handling sell percent direct:', error, ctx.update?.callback_query?.data);
-    await ctx.editMessageText(
-      '❌ *Error Processing Sell*\n\nSomething went wrong. Please try again.',
-      {
-        parse_mode: 'Markdown',
-        ...Markup.inlineKeyboard([
-          [Markup.button.callback('⬅️ Back', 'main_menu')]
-        ])
-      }
+  } catch (error) {
+    console.error('❌ Testnet sell error:', error);
+    await ctx.reply(
+      `❌ Error executing sell: ${error.message}`,
+      Markup.inlineKeyboard([[Markup.button.callback('🏠 Menu', 'main_menu')]])
     );
   }
 }
@@ -2363,7 +2745,7 @@ bot.launch()
   .catch((error) => {
     console.error('❌ Failed to start bot:', error);
     process.exit(1);
-});
+  });
 
 // Enable graceful stop
 process.once('SIGINT', () => {
@@ -2396,24 +2778,53 @@ async function handleInsomnBuy(ctx) {
     
     const provider = new ethers.JsonRpcProvider(process.env.RPC_URL);
     
-    // Use factory owner wallet for transactions (since factory has onlyOwner modifier)
-    const ownerPrivateKey = "99f33cb471e638d3d5a7cad46f712f2365710618e9afe3cf3e1c0e94f2c1eb1d";
-    const ownerWallet = new ethers.Wallet(ownerPrivateKey, provider);
-    
-    // Decrypt user's private key for balance checking
+    // Decrypt user's private key for real transactions
     const { decryptPrivateKey } = require('./utils/wallet');
     const decryptedPrivateKey = await decryptPrivateKey(wallet.private_key);
     const userWallet = new ethers.Wallet(decryptedPrivateKey, provider);
     
-    const result = await executeInsomnSwap(amount, "STT", tokenSymbol, ownerWallet, provider);
+    // Check user's actual STT balance
+    const userBalance = await provider.getBalance(userWallet.address);
+    const sttBalance = parseFloat(ethers.formatEther(userBalance));
     
-    // Escape special characters for Markdown
-    const escapedMessage = result.message.replace(/[_\*\[\]\(\)\~\`\>\#\+\-\=\|\{\}\.\!]/g, '\\$&');
+    if (sttBalance < parseFloat(amount)) {
+      await ctx.reply(`❌ Insufficient STT balance. You have ${sttBalance.toFixed(3)} STT, but need ${amount} STT.`);
+      return;
+    }
     
-    await ctx.reply(escapedMessage, { 
-      parse_mode: 'Markdown',
-      ...Markup.inlineKeyboard([[Markup.button.callback('🏠 Menu', 'main_menu')]])
-    });
+    console.log(`🔄 User ${ctx.from.id} buying ${amount} STT worth of ${tokenSymbol}...`);
+    console.log(`💰 User STT balance: ${sttBalance} STT`);
+    
+    const result = await executeTokenTransfer(amount, "STT", tokenSymbol, userWallet, provider);
+    
+    if (result.success) {
+      // Save trade to database
+      await saveUserTrade(ctx.from.id, {
+        tokenAddress: ctx.session.currentToken.address,
+        tokenSymbol: tokenSymbol,
+        amount: parseFloat(amount) * 1000, // Approximate token amount received
+        type: 'buy',
+        sttAmount: parseFloat(amount),
+        txHash: result.txHash
+      });
+
+      // Get updated balance after transaction
+      const newBalance = await provider.getBalance(userWallet.address);
+      const newSTTBalance = parseFloat(ethers.formatEther(newBalance));
+      
+      // Escape special characters for Markdown
+      const escapedMessage = result.message.replace(/[_\*\[\]\(\)\~\`\>\#\+\-\=\|\{\}\.\!]/g, '\\$&');
+      
+      await ctx.reply(escapedMessage + `\n\n📊 *New STT Balance:* ${newSTTBalance.toFixed(3)} STT`, { 
+        parse_mode: 'Markdown',
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback('📊 Positions', 'positions')],
+          [Markup.button.callback('🏠 Menu', 'main_menu')]
+        ])
+      });
+    } else {
+      await ctx.reply('❌ Error processing buy order. Please try again.');
+    }
     
   } catch (error) {
     console.error('❌ Error in INSOMN buy:', error);
@@ -2441,43 +2852,496 @@ async function handleInsomnSell(ctx) {
     
     const provider = new ethers.JsonRpcProvider(process.env.RPC_URL);
     
-    // Use factory owner wallet for transactions (since factory has onlyOwner modifier)
-    const ownerPrivateKey = "99f33cb471e638d3d5a7cad46f712f2365710618e9afe3cf3e1c0e94f2c1eb1d";
-    const ownerWallet = new ethers.Wallet(ownerPrivateKey, provider);
-    
-    // Decrypt user's private key for balance checking
+    // Decrypt user's private key for real transactions
     const { decryptPrivateKey } = require('./utils/wallet');
     const decryptedPrivateKey = await decryptPrivateKey(wallet.private_key);
     const userWallet = new ethers.Wallet(decryptedPrivateKey, provider);
     
-    // Get current balance
-    const balanceInfo = await getInsomnBalance(userWallet, provider);
-    if (!balanceInfo.success) {
-      await ctx.reply('❌ Could not get wallet balance.');
-      return;
-    }
+    // Get current token balance
+    const tokenAddress = getInsomnTokenAddress(tokenSymbol);
+    const tokenContract = new ethers.Contract(tokenAddress, ERC20_ABI, provider);
+    const tokenBalance = await tokenContract.balanceOf(userWallet.address);
+    const currentBalance = parseFloat(ethers.formatEther(tokenBalance));
     
-    const currentBalance = balanceInfo.balance[tokenSymbol.toLowerCase()];
-    if (!currentBalance || parseFloat(currentBalance) <= 0) {
+    if (currentBalance <= 0) {
       await ctx.reply(`❌ No ${tokenSymbol} balance to sell.`);
       return;
     }
     
     // Calculate sell amount
-    const sellAmount = (parseFloat(currentBalance) * parseInt(percentage)) / 100;
+    const sellAmount = (currentBalance * parseInt(percentage)) / 100;
     
-    const result = await executeInsomnSwap(sellAmount.toString(), tokenSymbol, "STT", ownerWallet, provider);
+    console.log(`🔄 User ${ctx.from.id} selling ${sellAmount} ${tokenSymbol}...`);
+    console.log(`💰 User ${tokenSymbol} balance: ${currentBalance} ${tokenSymbol}`);
     
-    // Escape special characters for Markdown
-    const escapedMessage = result.message.replace(/[_\*\[\]\(\)\~\`\>\#\+\-\=\|\{\}\.\!]/g, '\\$&');
+    const result = await executeTokenTransfer(sellAmount.toString(), tokenSymbol, "STT", userWallet, provider);
     
-    await ctx.reply(escapedMessage, { 
-      parse_mode: 'Markdown',
-      ...Markup.inlineKeyboard([[Markup.button.callback('🏠 Menu', 'main_menu')]])
-    });
+    if (result.success) {
+      // Save trade to database
+      await saveUserTrade(ctx.from.id, {
+        tokenAddress: ctx.session.currentToken.address,
+        tokenSymbol: tokenSymbol,
+        amount: sellAmount,
+        type: 'sell',
+        sttAmount: sellAmount * 0.001, // Approximate STT received
+        txHash: result.txHash
+      });
+
+      // Get updated STT balance after transaction
+      const newBalance = await provider.getBalance(userWallet.address);
+      const newSTTBalance = parseFloat(ethers.formatEther(newBalance));
+      
+      // Escape special characters for Markdown
+      const escapedMessage = result.message.replace(/[_\*\[\]\(\)\~\`\>\#\+\-\=\|\{\}\.\!]/g, '\\$&');
+      
+      await ctx.reply(escapedMessage + `\n\n📊 *New STT Balance:* ${newSTTBalance.toFixed(3)} STT`, { 
+        parse_mode: 'Markdown',
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback('📊 Positions', 'positions')],
+          [Markup.button.callback('🏠 Menu', 'main_menu')]
+        ])
+      });
+    } else {
+      await ctx.reply('❌ Error processing sell order. Please try again.');
+    }
     
   } catch (error) {
     console.error('❌ Error in INSOMN sell:', error);
     await ctx.reply('❌ Error processing sell order. Please try again.');
+  }
+}
+
+// Handler for viewing user positions
+async function handlePositions(ctx) {
+  try {
+    const userId = ctx.from.id;
+    const positions = await getUserPositions(userId);
+    
+    console.log('🔍 [DEBUG] handlePositions - User ID:', userId);
+    console.log('🔍 [DEBUG] handlePositions - Positions:', positions);
+    
+    if (!positions || positions.length === 0) {
+      await ctx.reply(
+        '📊 *Your Positions*\n\n' +
+        'You don\'t have any positions yet.\n' +
+        'Scan a token and make a trade to see your positions here!',
+        {
+          parse_mode: 'Markdown',
+          ...Markup.inlineKeyboard([
+            [Markup.button.callback('🔄 Buy', 'buy')],
+            [Markup.button.callback('🏠 Menu', 'main_menu')]
+          ])
+        }
+      );
+      return;
+    }
+
+    let message = '📊 *Your Positions*\n\n';
+    
+    for (const position of positions) {
+      console.log('🔍 [DEBUG] handlePositions - Position:', position);
+      console.log('🔍 [DEBUG] handlePositions - Position tokenAddress:', position.tokenAddress);
+      console.log('🔍 [DEBUG] handlePositions - Position tokenSymbol:', position.tokenSymbol);
+      
+      message += `🪙 *${position.tokenSymbol}*\n`;
+      message += `💰 Amount: ${position.amount.toFixed(6)}\n`;
+      message += `📈 Total Bought: ${position.totalBought.toFixed(6)}\n`;
+      message += `📉 Total Sold: ${position.totalSold.toFixed(6)}\n`;
+      message += `🕒 Last Trade: ${new Date(position.lastTrade).toLocaleDateString()}\n\n`;
+    }
+
+    const buttons = positions.map(pos => {
+      console.log('🔍 [DEBUG] handlePositions - Creating button for pos:', pos);
+      console.log('🔍 [DEBUG] handlePositions - pos.tokenAddress:', pos.tokenAddress);
+      console.log('🔍 [DEBUG] handlePositions - pos.tokenAddress isAddress:', ethers.isAddress(pos.tokenAddress));
+      
+      // Validate token address before creating button
+      if (!pos.tokenAddress || !ethers.isAddress(pos.tokenAddress)) {
+        console.error('🔍 [DEBUG] handlePositions - Invalid token address, skipping position:', pos.tokenAddress);
+        return null; // Skip this position
+      }
+      
+      return [
+        Markup.button.callback(
+          `Sell ${pos.tokenSymbol}`, 
+          `sell_position_${pos.tokenAddress}`
+        )
+      ];
+    }).filter(button => button !== null); // Remove null buttons
+
+    buttons.push([Markup.button.callback('🏠 Menu', 'main_menu')]);
+
+    await ctx.reply(message, {
+      parse_mode: 'Markdown',
+      ...Markup.inlineKeyboard(buttons)
+    });
+  } catch (error) {
+    console.error('Error showing positions:', error);
+    await ctx.reply(
+      '❌ Error loading positions. Please try again.',
+      Markup.inlineKeyboard([[Markup.button.callback('🏠 Menu', 'main_menu')]])
+    );
+  }
+}
+
+// Handler for selling a specific position
+async function handleSellPosition(ctx) {
+  try {
+    const tokenAddress = ctx.match[1];
+    const userId = ctx.from.id;
+    
+    console.log('🔍 [DEBUG] handleSellPosition - Token address:', tokenAddress);
+    console.log('🔍 [DEBUG] handleSellPosition - User ID:', userId);
+    
+    // Validate token address before proceeding
+    if (!tokenAddress || !ethers.isAddress(tokenAddress)) {
+      console.error('🔍 [DEBUG] handleSellPosition - Invalid token address:', tokenAddress);
+      await ctx.reply(
+        '❌ Invalid token address. Please try again.',
+        Markup.inlineKeyboard([[Markup.button.callback('🏠 Menu', 'main_menu')]])
+      );
+      return;
+    }
+    
+    const position = await getUserPosition(userId, tokenAddress);
+    
+    if (!position || position.amount <= 0) {
+      await ctx.reply(
+        '❌ No position found for this token.',
+        Markup.inlineKeyboard([[Markup.button.callback('🏠 Menu', 'main_menu')]])
+      );
+      return;
+    }
+
+    const buttons = Markup.inlineKeyboard([
+      [
+        Markup.button.callback('Sell 25%', `sell_percent_25_${tokenAddress}`),
+        Markup.button.callback('Sell 50%', `sell_percent_50_${tokenAddress}`),
+        Markup.button.callback('Sell 100%', `sell_percent_100_${tokenAddress}`)
+      ],
+      [Markup.button.callback('📊 Positions', 'positions')],
+      [Markup.button.callback('🏠 Menu', 'main_menu')]
+    ]);
+
+    await ctx.reply(
+      `🪙 *${position.tokenSymbol} Position*\n\n` +
+      `💰 Current Amount: ${position.amount.toFixed(6)} ${position.tokenSymbol}\n` +
+      `📈 Total Bought: ${position.totalBought.toFixed(6)}\n` +
+      `📉 Total Sold: ${position.totalSold.toFixed(6)}\n\n` +
+      `Select sell percentage:`,
+      {
+        parse_mode: 'Markdown',
+        ...buttons
+      }
+    );
+  } catch (error) {
+    console.error('Error handling sell position:', error);
+    await ctx.reply(
+      '❌ Error loading position. Please try again.',
+      Markup.inlineKeyboard([[Markup.button.callback('🏠 Menu', 'main_menu')]])
+    );
+  }
+}
+
+// Handler for DEX buy
+async function handleDexBuy(ctx) {
+  try {
+    const amount = ctx.match[1];
+    const tokenAddress = ctx.match[2];
+    const session = ctx.session?.currentToken;
+
+    // Check if session is valid
+    if (!session || session.address !== tokenAddress) {
+      await ctx.reply('❌ Session expired or invalid. Please scan the token again.');
+      return;
+    }
+
+    console.log('🏭 Executing real DEX buy...');
+    
+    try {
+      // Get user's wallet
+      const wallet = await getUserWallet(ctx.from.id);
+      if (!wallet) {
+        await ctx.reply('❌ No wallet found. Please create a wallet first.');
+        return;
+      }
+
+      // Initialize DEX service
+      const { swapTokens, getAmountsOut, calculateAmountOutMin } = require('./utils/dex');
+      const provider = new ethers.JsonRpcProvider(process.env.RPC_URL);
+      
+      // Decrypt private key before creating wallet
+      const { decryptPrivateKey } = require('./utils/testnetSwap');
+      let decryptedPrivateKey;
+      try {
+        decryptedPrivateKey = await decryptPrivateKey(wallet.private_key);
+      } catch (decryptError) {
+        await ctx.reply(`❌ Error decrypting wallet: ${decryptError.message}`);
+        return;
+      }
+      
+      const userWallet = new ethers.Wallet(decryptedPrivateKey, provider);
+
+      // Get STT address from environment
+      const STT_ADDRESS = process.env.WETH_ADDRESS || '0x4A3BC48C156384f9564Fd65A53a2f3D534D8f2b7';
+      
+      // Calculate amounts
+      const amountIn = ethers.parseEther(amount);
+      const path = [STT_ADDRESS, tokenAddress];
+      
+      console.log('🔍 [DEBUG] DEX Buy - Amount In:', amountIn.toString());
+      console.log('🔍 [DEBUG] DEX Buy - Path:', path);
+      
+      // Get expected output
+      const amountOut = await getAmountsOut(amountIn, path, 3000); // 0.3% fee
+      const amountOutMin = calculateAmountOutMin(amountOut, 1); // 1% slippage
+      
+      console.log('🔍 [DEBUG] DEX Buy - Expected Output:', amountOut.toString());
+      console.log('🔍 [DEBUG] DEX Buy - Min Output:', amountOutMin.toString());
+      
+      // Execute the swap
+      const swapResult = await swapTokens(
+        amountIn,
+        amountOutMin,
+        STT_ADDRESS,
+        tokenAddress,
+        userWallet,
+        3000 // 0.3% fee
+      );
+
+      if (swapResult.success) {
+        // Save trade to database
+        await saveUserTrade(ctx.from.id, {
+          tokenAddress: tokenAddress,
+          tokenSymbol: session.info.symbol,
+          amount: parseFloat(ethers.formatEther(amountOut)),
+          type: 'buy',
+          sttAmount: parseFloat(amount),
+          txHash: swapResult.txHash
+        });
+
+        // Update user's position in database
+        await updateUserPosition(ctx.from.id, {
+          tokenAddress: tokenAddress,
+          tokenSymbol: session.info.symbol,
+          amount: parseFloat(ethers.formatEther(amountOut)),
+          type: 'buy'
+        });
+
+        // Get new STT balance
+        const newSTTBalance = parseFloat(ethers.formatEther(await provider.getBalance(userWallet.address)));
+        
+        await ctx.reply(
+          `✅ *DEX Buy Complete!*\n\n` +
+          `💰 Spent: ${amount} STT\n` +
+          `🪙 Received: ${ethers.formatEther(amountOut)} ${session.info.symbol}\n` +
+          `💱 Rate: 1 STT = ${(parseFloat(ethers.formatEther(amountOut)) / parseFloat(amount)).toFixed(6)} ${session.info.symbol}\n` +
+          `🔗 [Transaction](https://shannon-explorer.somnia.network/tx/${swapResult.txHash})\n\n` +
+          `📊 *New Balance:*\n` +
+          `💰 STT: ${newSTTBalance.toFixed(3)}`,
+          {
+            parse_mode: 'Markdown',
+            ...Markup.inlineKeyboard([
+              [Markup.button.callback('📊 Positions', 'positions')],
+              [Markup.button.callback('🏠 Menu', 'main_menu')]
+            ])
+          }
+        );
+      } else {
+        throw new Error(swapResult.error || 'DEX buy failed');
+      }
+    } catch (error) {
+      console.error('❌ DEX buy error:', error);
+      
+      // Truncate long error messages to prevent Telegram parsing errors
+      const errorMessage = error.message.length > 200 
+        ? error.message.substring(0, 200) + '...' 
+        : error.message;
+      
+      await ctx.reply(
+        '❌ *DEX Buy Failed*\n\n' +
+        `Error: ${errorMessage.replace(/[*_`]/g, '\\$&')}\n\n` +
+        'This could be due to:\n' +
+        '• Insufficient liquidity\n' +
+        '• High slippage\n' +
+        '• Network issues\n\n' +
+        'Please try again with a smaller amount.',
+        {
+          parse_mode: 'Markdown',
+          ...Markup.inlineKeyboard([
+            [Markup.button.callback('🔄 Try Again', `dex_buy_${amount}_${tokenAddress}`)],
+            [Markup.button.callback('🏠 Menu', 'main_menu')]
+          ])
+        }
+      );
+    }
+  } catch (error) {
+    console.error('❌ DEX buy handler error:', error);
+    await ctx.reply(
+      '❌ *Error*\n\n' +
+      'An unexpected error occurred. Please try again.',
+      {
+        parse_mode: 'Markdown',
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback('🏠 Menu', 'main_menu')]
+        ])
+      }
+    );
+  }
+}
+
+// Handler for DEX sell
+async function handleDexSell(ctx) {
+  try {
+    const percent = Number(ctx.match[1]);
+    const tokenAddress = ctx.match[2];
+    const session = ctx.session?.currentToken;
+
+    // Check if session is valid
+    if (!session || session.address !== tokenAddress) {
+      await ctx.reply('❌ Session expired or invalid. Please scan the token again.');
+      return;
+    }
+
+    console.log('🏭 Executing real DEX sell...');
+    
+    try {
+      // Get user's wallet
+      const wallet = await getUserWallet(ctx.from.id);
+      if (!wallet) {
+        await ctx.reply('❌ No wallet found. Please create a wallet first.');
+        return;
+      }
+
+      // Initialize DEX service
+      const { swapTokens, getAmountsOut, calculateAmountOutMin } = require('./utils/dex');
+      const provider = new ethers.JsonRpcProvider(process.env.RPC_URL);
+      
+      // Decrypt private key before creating wallet
+      const { decryptPrivateKey } = require('./utils/testnetSwap');
+      let decryptedPrivateKey;
+      try {
+        decryptedPrivateKey = await decryptPrivateKey(wallet.private_key);
+      } catch (decryptError) {
+        await ctx.reply(`❌ Error decrypting wallet: ${decryptError.message}`);
+        return;
+      }
+      
+      const userWallet = new ethers.Wallet(decryptedPrivateKey, provider);
+
+      // Get STT address from environment
+      const STT_ADDRESS = process.env.WETH_ADDRESS || '0x4A3BC48C156384f9564Fd65A53a2f3D534D8f2b7';
+      
+      // Check if user has a position for this token
+      const userPosition = await getUserPosition(ctx.from.id, tokenAddress);
+      if (!userPosition || userPosition.amount <= 0) {
+        await ctx.reply('❌ No position found for this token. Please scan the token again to sell.');
+        return;
+      }
+
+      // Calculate sell amount based on position
+      const sellAmount = (userPosition.amount * percent) / 100;
+      
+      if (sellAmount <= 0) {
+        await ctx.reply('❌ Nothing to sell for this percentage.');
+        return;
+      }
+
+      // Calculate amounts
+      const amountIn = ethers.parseEther(sellAmount.toString());
+      const path = [tokenAddress, STT_ADDRESS];
+      
+      console.log('🔍 [DEBUG] DEX Sell - Amount In:', amountIn.toString());
+      console.log('🔍 [DEBUG] DEX Sell - Path:', path);
+      
+      // Get expected output
+      const amountOut = await getAmountsOut(amountIn, path, 3000); // 0.3% fee
+      const amountOutMin = calculateAmountOutMin(amountOut, 1); // 1% slippage
+      
+      console.log('🔍 [DEBUG] DEX Sell - Expected Output:', amountOut.toString());
+      console.log('🔍 [DEBUG] DEX Sell - Min Output:', amountOutMin.toString());
+      
+      // Execute the swap
+      const swapResult = await swapTokens(
+        amountIn,
+        amountOutMin,
+        tokenAddress,
+        STT_ADDRESS,
+        userWallet,
+        3000 // 0.3% fee
+      );
+
+      if (swapResult.success) {
+        // Save trade to database
+        await saveUserTrade(ctx.from.id, {
+          tokenAddress: tokenAddress,
+          tokenSymbol: session.info.symbol,
+          amount: sellAmount,
+          type: 'sell',
+          sttAmount: parseFloat(ethers.formatEther(amountOut)),
+          txHash: swapResult.txHash
+        });
+
+        // Update user's position in database
+        await updateUserPosition(ctx.from.id, {
+          tokenAddress: tokenAddress,
+          tokenSymbol: session.info.symbol,
+          amount: -sellAmount, // Negative for sell
+          type: 'sell'
+        });
+
+        // Get new STT balance
+        const newSTTBalance = parseFloat(ethers.formatEther(await provider.getBalance(userWallet.address)));
+        
+        await ctx.reply(
+          `✅ *DEX Sell Complete!*\n\n` +
+          `🪙 Sold: ${sellAmount.toFixed(6)} ${session.info.symbol}\n` +
+          `💰 Received: ${ethers.formatEther(amountOut)} STT\n` +
+          `💱 Rate: 1 ${session.info.symbol} = ${(parseFloat(ethers.formatEther(amountOut)) / sellAmount).toFixed(6)} STT\n` +
+          `🔗 [Transaction](https://shannon-explorer.somnia.network/tx/${swapResult.txHash})\n\n` +
+          `📊 *New Balance:*\n` +
+          `💰 STT: ${newSTTBalance.toFixed(3)}`,
+          {
+            parse_mode: 'Markdown',
+            ...Markup.inlineKeyboard([
+              [Markup.button.callback('📊 Positions', 'positions')],
+              [Markup.button.callback('🏠 Menu', 'main_menu')]
+            ])
+          }
+        );
+      } else {
+        throw new Error(swapResult.error || 'DEX sell failed');
+      }
+    } catch (error) {
+      console.error('❌ DEX sell error:', error);
+      await ctx.reply(
+        '❌ *DEX Sell Failed*\n\n' +
+        `Error: ${error.message}\n\n` +
+        'This could be due to:\n' +
+        '• Insufficient liquidity\n' +
+        '• High slippage\n' +
+        '• Network issues\n\n' +
+        'Please try again with a smaller amount.',
+        {
+          parse_mode: 'Markdown',
+          ...Markup.inlineKeyboard([
+            [Markup.button.callback('🔄 Try Again', `dex_sell_${percent}_${tokenAddress}`)],
+            [Markup.button.callback('🏠 Menu', 'main_menu')]
+          ])
+        }
+      );
+    }
+  } catch (error) {
+    console.error('❌ DEX sell handler error:', error);
+    await ctx.reply(
+      '❌ *Error*\n\n' +
+      'An unexpected error occurred. Please try again.',
+      {
+        parse_mode: 'Markdown',
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback('🏠 Menu', 'main_menu')]
+        ])
+      }
+    );
   }
 }

@@ -134,10 +134,8 @@ async function handleCreateWallet(ctx) {
     console.log(`Sending welcome message`);
     // Create custom buttons with copy address functionality
     const customButtons = [
-      [
-        Markup.button.callback('📋 Copy Address', `copy_address_${address}`),
-        Markup.button.callback('🔄 Refresh', 'refresh')
-      ],
+      [Markup.button.callback('🔄 Refresh', 'refresh')],
+      [Markup.button.callback('📊 Positions', 'positions')],
       ...mainMenuButtons.slice(1) // Add the rest of the main menu buttons
     ];
 
@@ -252,10 +250,8 @@ async function handlePrivateKeyInput(ctx) {
 
     // Create custom buttons with copy address functionality
     const customButtons = [
-      [
-        Markup.button.callback('📋 Copy Address', `copy_address_${address}`),
-        Markup.button.callback('🔄 Refresh', 'refresh')
-      ],
+      [Markup.button.callback('🔄 Refresh', 'refresh')],
+      [Markup.button.callback('📊 Positions', 'positions')],
       ...mainMenuButtons.slice(1) // Add the rest of the main menu buttons
     ];
 

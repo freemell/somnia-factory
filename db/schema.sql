@@ -80,6 +80,18 @@ CREATE TABLE IF NOT EXISTS user_settings (
   updated_at TIMESTAMP WITH TIME ZONE DEFAULT TIMEZONE('utc'::text, NOW())
 );
 
+-- User positions table for tracking token holdings
+CREATE TABLE IF NOT EXISTS user_positions (
+  id SERIAL PRIMARY KEY,
+  user_id BIGINT REFERENCES users(user_id) ON DELETE CASCADE,
+  token_address TEXT NOT NULL,
+  token_symbol TEXT NOT NULL,
+  amount DECIMAL DEFAULT 0,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT TIMEZONE('utc'::text, NOW()),
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT TIMEZONE('utc'::text, NOW()),
+  UNIQUE(user_id, token_address)
+);
+
 -- Watchlist table
 CREATE TABLE IF NOT EXISTS watchlist (
   id SERIAL PRIMARY KEY,
@@ -96,4 +108,6 @@ CREATE INDEX IF NOT EXISTS idx_limit_orders_user_id ON limit_orders(user_id);
 CREATE INDEX IF NOT EXISTS idx_limit_orders_status ON limit_orders(status);
 CREATE INDEX IF NOT EXISTS idx_bridge_transactions_user_id ON bridge_transactions(user_id);
 CREATE INDEX IF NOT EXISTS idx_alerts_user_id ON alerts(user_id);
-CREATE INDEX IF NOT EXISTS idx_user_settings_user_id ON user_settings(user_id); 
+CREATE INDEX IF NOT EXISTS idx_user_settings_user_id ON user_settings(user_id);
+CREATE INDEX IF NOT EXISTS idx_user_positions_user_id ON user_positions(user_id);
+CREATE INDEX IF NOT EXISTS idx_user_positions_token_address ON user_positions(token_address); 

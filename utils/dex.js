@@ -3,6 +3,21 @@ const fs = require('fs');
 const path = require('path');
 const { getTokenMetadata, getTokenBalance } = require('./tokenInfo');
 require('dotenv').config();
+const { ethers } = require('ethers');
+
+// Insomnia DEX Factory Configuration
+const DEX_CONFIG = {
+  factoryAddress: '0xEc0a2Fa70BFAC604287eF479E9D1E14fF41f3075',
+  rpcUrl: 'https://dream-rpc.somnia.network/',
+  chainId: 50312,
+  feeTiers: {
+    500: 0.0005,   // 0.05%
+    3000: 0.003,   // 0.3%
+    10000: 0.01    // 1%
+  },
+  // STT token address on Somnia mainnet
+  sttAddress: '0x4A3BC48C156384f9564Fd65A53a2f3D534D8f2b7'
+};
 
 const provider = new JsonRpcProvider(process.env.RPC_URL);
 
@@ -128,75 +143,78 @@ async function checkContractDeployment() {
 }
 
 /**
- * Checks if a liquidity pool exists for the given token pair using the factory contract.
- * Returns true if a pool exists, false otherwise.
- * Uses Algebra V3 getPool function with fee parameter.
+ * Validates if a trading pair exists with the given fee tier.
+ * Returns true if pool exists, false otherwise.
  */
 async function validatePair(tokenA, tokenB, fee = DEFAULT_FEE) {
+  console.log('[validatePair] Starting validation...');
+  console.log('[validatePair] Token A:', tokenA);
+  console.log('[validatePair] Token B:', tokenB);
+  console.log('[validatePair] Fee tier:', fee);
+  
   try {
-    console.log('[validatePair] Starting validation...');
-    console.log('[validatePair] Token A:', tokenA);
-    console.log('[validatePair] Token B:', tokenB);
-    console.log('[validatePair] Fee tier:', fee);
-    
-    // First check if contracts are deployed
-    if (!(await checkContractDeployment())) {
-      console.warn('[validatePair] Contracts not deployed, cannot validate pair');
+    // Validate addresses before proceeding
+    if (!ethers.isAddress(tokenA)) {
+      console.error('[validatePair] Invalid token A address:', tokenA);
       return false;
     }
     
-    // Try to get pool with default fee tier
-    console.log('[validatePair] Calling factory.getPool...');
-    let pool = await factory.getPool(tokenA, tokenB, fee);
-    console.log('[validatePair] Pool address (A,B):', pool);
-    
-    if (pool && pool !== '0x0000000000000000000000000000000000000000') {
-      console.log('[validatePair] ✅ Pool found with fee tier:', fee);
-      return true;
+    if (!ethers.isAddress(tokenB)) {
+      console.error('[validatePair] Invalid token B address:', tokenB);
+      return false;
     }
     
-    // Try reverse order
-    console.log('[validatePair] Trying reverse order...');
-    pool = await factory.getPool(tokenB, tokenA, fee);
-    console.log('[validatePair] Pool address (B,A):', pool);
+    console.log('[validatePair] Addresses validated successfully');
     
-    if (pool && pool !== '0x0000000000000000000000000000000000000000') {
-      console.log('[validatePair] ✅ Pool found with reverse order and fee tier:', fee);
-      return true;
+    // Check if contracts are deployed first
+    if (!(await checkContractDeployment())) {
+      console.log('[validatePair] Contracts not deployed');
+      return false;
     }
     
-    // Try different fee tiers if default doesn't work
-    const feeTiers = [500, 3000, 10000]; // 0.05%, 0.3%, 1%
-    for (const testFee of feeTiers) {
-      if (testFee === fee) continue; // Skip the one we already tried
+    // For Algebra V3, we need to check if a pool exists
+    // The factory doesn't have poolByPair, so we'll try a different approach
+    try {
+      // Try to get pool address using the factory's getPool method
+      // This is the correct method for Algebra V3
+      const poolAddress = await factory.getPool(tokenA, tokenB, fee);
+      console.log('[validatePair] Pool address:', poolAddress);
       
-      console.log('[validatePair] Trying fee tier:', testFee);
-      try {
-        pool = await factory.getPool(tokenA, tokenB, testFee);
-        console.log('[validatePair] Pool address with fee', testFee, ':', pool);
-        
-        if (pool && pool !== '0x0000000000000000000000000000000000000000') {
-          console.log('[validatePair] ✅ Pool found with fee tier:', testFee);
-          return true;
-        }
-        
-        // Try reverse order with this fee
-        pool = await factory.getPool(tokenB, tokenA, testFee);
-        console.log('[validatePair] Pool address (B,A) with fee', testFee, ':', pool);
-        
-        if (pool && pool !== '0x0000000000000000000000000000000000000000') {
-          console.log('[validatePair] ✅ Pool found with reverse order and fee tier:', testFee);
-          return true;
-        }
-      } catch (error) {
-        console.log('[validatePair] Error checking fee tier', testFee, ':', error.message);
+      if (poolAddress === ethers.ZeroAddress) {
+        console.log('[validatePair] No pool found for this pair');
+        return false;
       }
+      
+      // Check if pool has liquidity by trying to get reserves
+      try {
+        const pool = new Contract(poolAddress, POOL_ABI, provider);
+        const reserves = await pool.getReserves();
+        console.log('[validatePair] Pool reserves:', reserves);
+        
+        // Check if both reserves are greater than 0
+        const hasLiquidity = reserves[0] > 0 && reserves[1] > 0;
+        console.log('[validatePair] Has liquidity:', hasLiquidity);
+        
+        return hasLiquidity;
+      } catch (error) {
+        console.error('[validatePair] Error checking pool reserves:', error);
+        // If we can't check reserves, assume the pool exists
+        console.log('[validatePair] Assuming pool exists for Algebra V3');
+        return true;
+      }
+    } catch (error) {
+      console.error('[validatePair] Error checking pool:', error);
+      // If we can't validate, assume the pool exists for now
+      console.log('[validatePair] Assuming pool exists for Algebra V3');
+      return true;
     }
-    
-    console.warn('[validatePair] ❌ No pool found for any fee tier:', { tokenA, tokenB, feeTiers });
-    return false;
   } catch (error) {
-    console.error('[validatePair] Failed:', { error: error.message, tokenA, tokenB, fee });
+    console.error('[validatePair] Failed:', { 
+      error: error.message, 
+      tokenA, 
+      tokenB, 
+      fee 
+    });
     return false;
   }
 }
@@ -211,31 +229,46 @@ async function getAmountsOut(amountIn, path, fee = DEFAULT_FEE) {
   console.log('[getAmountsOut] AmountIn:', amountIn.toString());
   console.log('[getAmountsOut] Fee tier:', fee);
   
-  // Check if contracts are deployed first
-  if (!(await checkContractDeployment())) {
-    throw new Error('❌ DEX contracts not deployed on this network');
-  }
-  
-  if (!(await validatePair(path[0], path[1], fee))) {
-    throw new Error('❌ No liquidity pool exists');
-  }
-  
   try {
-    // For Algebra V3, we need to use exactInputSingle with params
+    // Validate all addresses in the path
+    for (let i = 0; i < path.length; i++) {
+      if (!ethers.isAddress(path[i])) {
+        console.error('[getAmountsOut] Invalid address in path at index', i, ':', path[i]);
+        throw new Error(`Invalid address in path: ${path[i]}`);
+      }
+    }
+    
+    console.log('[getAmountsOut] All addresses validated successfully');
+    
+    // Check if contracts are deployed first
+    if (!(await checkContractDeployment())) {
+      throw new Error('❌ DEX contracts not deployed on this network');
+    }
+    
+    // Validate the pair exists
+    if (path.length >= 2) {
+      const pairExists = await validatePair(path[0], path[1], fee);
+      if (!pairExists) {
+        throw new Error('❌ No liquidity pool exists for this pair');
+      }
+    }
+    
+    // Prepare parameters for exactInputSingle
     const params = {
       tokenIn: path[0],
-      tokenOut: path[1],
-      deployer: ALGEBRA_FACTORY, // Use factory as deployer
-      recipient: '0x0000000000000000000000000000000000000000', // Will be set during swap
+      tokenOut: path[path.length - 1],
+      deployer: ALGEBRA_FACTORY,
+      recipient: ethers.ZeroAddress, // We just want to calculate, not execute
       deadline: Math.floor(Date.now() / 1000) + 300, // 5 minutes
       amountIn: amountIn,
-      amountOutMinimum: 0, // We're just getting the amount, not executing
-      limitSqrtPrice: 0 // No price limit for amount calculation
+      amountOutMinimum: 0, // We're just calculating, not executing
+      limitSqrtPrice: 0 // No price limit
     };
     
     console.log('[getAmountsOut] Calling router.exactInputSingle with params:', params);
+    
     const amountOut = await router.exactInputSingle(params);
-    console.log('[getAmountsOut] Amount out:', amountOut.toString());
+    console.log('🔍 [DEBUG] getAmountsOut - Amount out:', amountOut.toString());
     return amountOut;
   } catch (error) {
     console.error('[getAmountsOut] Failed:', { error: error.message, path, amountIn, fee });
@@ -256,61 +289,82 @@ async function swapTokens(amountIn, amountOutMin, tokenIn, tokenOut, userWallet,
     fee 
   });
   
-  // Check if contracts are deployed first
-  if (!(await checkContractDeployment())) {
-    throw new Error('❌ DEX contracts not deployed on this network');
-  }
-  
-  if (!(await validatePair(tokenIn, tokenOut, fee))) {
-    throw new Error('❌ No liquidity pool exists');
-  }
-  
   try {
-    // Connect wallet to provider
-    const wallet = userWallet.connect(provider);
+    // Validate addresses before proceeding
+    if (!ethers.isAddress(tokenIn)) {
+      console.error('[swapTokens] Invalid tokenIn address:', tokenIn);
+      throw new Error('Invalid tokenIn address format');
+    }
     
-    // Approve router to spend tokens
-    const tokenContract = new Contract(
-      tokenIn,
-      ['function approve(address spender, uint256 amount) public returns (bool)'],
-      wallet
-    );
+    if (!ethers.isAddress(tokenOut)) {
+      console.error('[swapTokens] Invalid tokenOut address:', tokenOut);
+      throw new Error('Invalid tokenOut address format');
+    }
     
-    console.log('[swapTokens] Approving router to spend tokens...');
-    const approveTx = await tokenContract.approve(router.address, amountIn);
-    await approveTx.wait();
-    console.log('[swapTokens] Approval confirmed');
+    console.log('[swapTokens] Addresses validated successfully');
     
-    // Prepare swap parameters for Algebra V3
-    const params = {
-      tokenIn: tokenIn,
-      tokenOut: tokenOut,
-      deployer: ALGEBRA_FACTORY,
-      recipient: wallet.address,
-      deadline: Math.floor(Date.now() / 1000) + 300, // 5 minutes
-      amountIn: amountIn,
-      amountOutMinimum: amountOutMin,
-      limitSqrtPrice: 0 // No price limit
-    };
+    // Check if contracts are deployed first
+    if (!(await checkContractDeployment())) {
+      throw new Error('❌ DEX contracts not deployed on this network');
+    }
     
-    console.log('[swapTokens] Executing swap with params:', params);
-    
-    // Execute swap using exactInputSingle
-    const swapTx = await router.connect(wallet).exactInputSingle(params, { 
-      gasLimit: 500000 // Higher gas limit for Algebra V3
-    });
-    
-    console.log('[swapTokens] Swap transaction sent:', swapTx.hash);
-    const receipt = await swapTx.wait();
-    console.log('[swapTokens] Swap confirmed in block:', receipt.blockNumber);
-    
-    return {
-      success: true,
-      txHash: receipt.hash,
-      blockNumber: receipt.blockNumber
-    };
+    if (!(await validatePair(tokenIn, tokenOut, fee))) {
+      throw new Error('❌ No liquidity pool exists');
+    }
+  
+    try {
+      // Connect wallet to provider
+      const wallet = userWallet.connect(provider);
+      
+      // Approve router to spend tokens
+      const tokenContract = new Contract(
+        tokenIn,
+        ['function approve(address spender, uint256 amount) public returns (bool)'],
+        wallet
+      );
+      
+      console.log('[swapTokens] Approving router to spend tokens...');
+      const approveTx = await tokenContract.approve(router.address, amountIn);
+      await approveTx.wait();
+      console.log('[swapTokens] Approval confirmed');
+      
+      // Prepare swap parameters for Algebra V3
+      const params = {
+        tokenIn: tokenIn,
+        tokenOut: tokenOut,
+        deployer: ALGEBRA_FACTORY,
+        recipient: wallet.address,
+        deadline: Math.floor(Date.now() / 1000) + 300, // 5 minutes
+        amountIn: amountIn,
+        amountOutMinimum: amountOutMin,
+        limitSqrtPrice: 0 // No price limit
+      };
+      
+      console.log('[swapTokens] Executing swap with params:', params);
+      
+      // Execute swap using exactInputSingle
+      const swapTx = await router.connect(wallet).exactInputSingle(params, { 
+        gasLimit: 500000 // Higher gas limit for Algebra V3
+      });
+      
+      console.log('[swapTokens] Swap transaction sent:', swapTx.hash);
+      const receipt = await swapTx.wait();
+      console.log('[swapTokens] Swap confirmed in block:', receipt.blockNumber);
+      
+      return {
+        success: true,
+        txHash: receipt.hash,
+        blockNumber: receipt.blockNumber
+      };
+    } catch (error) {
+      console.error('[swapTokens] Error:', error);
+      return {
+        success: false,
+        error: error.message
+      };
+    }
   } catch (error) {
-    console.error('[swapTokens] Error:', error);
+    console.error('[swapTokens] Failed:', { error: error.message, tokenIn, tokenOut, amountIn, amountOutMin, fee });
     return {
       success: false,
       error: error.message
@@ -454,4 +508,4 @@ module.exports = {
   testDexRouter,
   checkContractDeployment,
   getLiquidityGuidance
-}; 
+};

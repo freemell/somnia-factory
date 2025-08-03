@@ -77,10 +77,28 @@ async function decryptPrivateKey(encryptedKey) {
       throw new Error('Invalid encrypted key format');
     }
 
+    console.log('[DEBUG] Encrypted key length:', encryptedKey.length);
+    console.log('[DEBUG] Encrypted key format:', encryptedKey.substring(0, 50) + '...');
+    
+    // Check if this is a raw private key (starts with 0x and is 66 chars)
+    if (encryptedKey.startsWith('0x') && encryptedKey.length === 66) {
+      console.log('[DEBUG] Detected raw private key, returning as-is');
+      return encryptedKey;
+    }
+    
+    // Check if this is an encrypted key (has : separators)
+    if (!encryptedKey.includes(':')) {
+      console.error('[DEBUG] No : separators found, invalid encrypted format');
+      throw new Error('Invalid encrypted key format - no separators');
+    }
+    
     const [ivHex, encrypted, authTagHex] = encryptedKey.split(':');
+    
+    console.log('[DEBUG] Split parts:', { ivHex: ivHex?.length, encrypted: encrypted?.length, authTagHex: authTagHex?.length });
     
     // Validate the split parts
     if (!ivHex || !encrypted || !authTagHex) {
+      console.error('[DEBUG] Missing parts:', { ivHex: !!ivHex, encrypted: !!encrypted, authTagHex: !!authTagHex });
       throw new Error('Invalid encrypted key format - missing parts');
     }
     
